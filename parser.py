@@ -6,6 +6,8 @@ Determines BUY vs SELL from balance changes
 import logging
 from typing import Optional, Dict, List
 from decimal import Decimal
+import requests
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,47 @@ WSOL_MINT = "So11111111111111111111111111111111111111112"
 
 
 class TransactionParser:
+    
+    @staticmethod
+    def fetch_token_metadata(token_mint: str) -> Dict:
+        """
+        Fetch token metadata from Jupiter API or DexScreener
+        Returns symbol and name
+        """
+        try:
+            # Try Jupiter API first
+            url = f"https://tokens.jup.ag/token/{token_mint}"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    'symbol': data.get('symbol', 'UNKNOWN'),
+                    'name': data.get('name', None)
+                }
+        except Exception as e:
+            logger.debug(f"Jupiter API failed for {token_mint}: {e}")
+        
+        try:
+            # Try DexScreener as backup
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{token_mint}"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('pairs') and len(data['pairs']) > 0:
+                    pair = data['pairs'][0]
+                    base_token = pair.get('baseToken', {})
+                    return {
+                        'symbol': base_token.get('symbol', 'UNKNOWN'),
+                        'name': base_token.get('name', None)
+                    }
+        except Exception as e:
+            logger.debug(f"DexScreener API failed for {token_mint}: {e}")
+        
+        # Fallback to shortened mint address
+        return {
+            'symbol': token_mint[:6],
+            'name': None
+        }
     
     @staticmethod
     def parse_transaction(tx_data: Dict, whale_address: str) -> Optional[Dict]:
@@ -122,23 +165,22 @@ class TransactionParser:
                 logger.debug(f"Ambiguous transaction (token: {token_change}, SOL: {whale_sol_change}): {signature}")
                 return None
             
-            # Get token symbol from metadata if available
+            # FIXED: Fetch actual token metadata from APIs
             token_symbol = "UNKNOWN"
+            
+            # First, try to get from Helius transaction data
             for transfer in token_transfers:
                 if transfer.get('mint') == token_mint:
-                    token_symbol = transfer.get('tokenStandard', 'UNKNOWN')
-                    # Try to get symbol from metadata
-                    if 'metadata' in tx_data:
-                        # Helius sometimes includes token metadata
-                        pass
-                    break
+                    # Check if Helius provided token info
+                    if 'tokenSymbol' in transfer:
+                        token_symbol = transfer['tokenSymbol']
+                        break
             
-            # Try to extract symbol from account data
-            account_data = tx_data.get('accountData', [])
-            for account in account_data:
-                if account.get('account') == token_mint:
-                    token_symbol = account.get('tokenSymbol', token_symbol)
-                    break
+            # If still unknown, fetch from external APIs
+            if token_symbol == "UNKNOWN":
+                logger.info(f"Fetching token metadata for mint: {token_mint}")
+                metadata = TransactionParser.fetch_token_metadata(token_mint)
+                token_symbol = metadata['symbol']
             
             result = {
                 'type': trade_type,
@@ -176,7 +218,9 @@ class TransactionParser:
             token_transfers = tx_data.get('tokenTransfers', [])
             for transfer in token_transfers:
                 if transfer.get('mint') == token_mint:
-                    info['symbol'] = transfer.get('tokenStandard', info['symbol'])
+                    # Fixed: use tokenSymbol instead of tokenStandard
+                    if 'tokenSymbol' in transfer:
+                        info['symbol'] = transfer['tokenSymbol']
                     info['decimals'] = transfer.get('decimals', info['decimals'])
                     break
             
@@ -187,6 +231,12 @@ class TransactionParser:
                     info['symbol'] = account.get('tokenSymbol', info['symbol'])
                     info['name'] = account.get('tokenName')
                     break
+            
+            # If still unknown, fetch from APIs
+            if info['symbol'] == 'UNKNOWN':
+                metadata = TransactionParser.fetch_token_metadata(token_mint)
+                info['symbol'] = metadata['symbol']
+                info['name'] = metadata['name']
         
         except Exception as e:
             logger.error(f"Error extracting token info: {e}")
