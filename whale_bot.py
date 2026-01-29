@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Configuration from environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')  # WizTheoryLabs group chat ID
+TELEGRAM_THREAD_ID = os.getenv('TELEGRAM_THREAD_ID')  # Whale Tracking topic ID (164)
 ADMIN_USER_IDS = [int(id.strip()) for id in os.getenv('ADMIN_USER_IDS', '').split(',') if id.strip()]
 WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', 5000))
 
@@ -63,6 +64,8 @@ class WhaleTrackerBot:
         self.application.add_handler(CommandHandler("help", self.cmd_help))
         
         logger.info("Bot initialized")
+        if TELEGRAM_THREAD_ID:
+            logger.info(f"Whale alerts will post to topic ID: {TELEGRAM_THREAD_ID}")
     
     async def process_transaction(self, tx_data: dict, whale_address: str):
         """Process incoming transaction from Helius webhook"""
@@ -97,14 +100,21 @@ class WhaleTrackerBot:
             # Send to Telegram group with rate limiting
             async with self.rate_limiter:
                 try:
-                    await self.bot.send_message(
-                        chat_id=TELEGRAM_CHAT_ID,
-                        text=message,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup,
-                        disable_web_page_preview=True
-                    )
-                    logger.info(f"Posted {trade['type']} alert for {whale['label']}")
+                    # FIXED: Add message_thread_id to post to specific topic
+                    send_kwargs = {
+                        'chat_id': TELEGRAM_CHAT_ID,
+                        'text': message,
+                        'parse_mode': ParseMode.HTML,
+                        'reply_markup': reply_markup,
+                        'disable_web_page_preview': True
+                    }
+                    
+                    # Add thread_id if configured (posts to specific topic)
+                    if TELEGRAM_THREAD_ID:
+                        send_kwargs['message_thread_id'] = int(TELEGRAM_THREAD_ID)
+                    
+                    await self.bot.send_message(**send_kwargs)
+                    logger.info(f"Posted {trade['type']} alert for {whale['label']} to topic {TELEGRAM_THREAD_ID or 'main chat'}")
                 except TelegramError as e:
                     logger.error(f"Failed to send Telegram message: {e}")
                     # Don't mark as processed if send failed
