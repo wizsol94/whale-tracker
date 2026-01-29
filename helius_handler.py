@@ -55,8 +55,13 @@ class HeliusWebhookHandler:
                     whale_address = self._extract_whale_address(tx)
                     
                     if whale_address:
-                        # Process in background
-                        asyncio.create_task(self.on_transaction(tx, whale_address))
+                        # Process in background using thread to avoid event loop issues
+                        import threading
+                        thread = threading.Thread(
+                            target=lambda t=tx, w=whale_address: asyncio.run(self.on_transaction(t, w)),
+                            daemon=True
+                        )
+                        thread.start()
                     else:
                         logger.warning("Could not extract whale address from transaction")
                 
