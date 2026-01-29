@@ -262,6 +262,10 @@ class WhaleTrackerBot:
 
 def main():
     """Main entry point"""
+    # Fix for event loop issue
+    import nest_asyncio
+    nest_asyncio.apply()
+    
     # Validate required environment variables
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not set!")
