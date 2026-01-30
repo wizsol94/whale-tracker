@@ -266,7 +266,16 @@ class WhaleTrackerBot:
     def run_webhook_server(self):
         """Run Helius webhook server"""
         logger.info("Starting Helius webhook server...")
-        webhook_handler = HeliusWebhookHandler(on_transaction=self.process_transaction)
+        
+        # Get known whale addresses from database
+        whales = db.get_all_whales()
+        known_addresses = {whale['address'] for whale in whales}
+        logger.info(f"Tracking {len(known_addresses)} whale addresses")
+        
+        webhook_handler = HeliusWebhookHandler(
+            on_transaction=self.process_transaction,
+            known_whales=known_addresses
+        )
         webhook_handler.run(port=WEBHOOK_PORT)
 
 
