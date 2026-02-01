@@ -24,7 +24,7 @@ from helius_handler import HeliusWebhookHandler
 # Setup logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG  # Changed to DEBUG to see all emoji logs
 )
 logger = logging.getLogger(__name__)
 
