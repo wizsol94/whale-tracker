@@ -216,13 +216,13 @@ class MessageFormatter:
         return message
     
     @staticmethod
-    def format_help_message() -> str:
-        """Format help message"""
-        return """<b>🐋 Whale Tracker Bot Commands</b>
+    def format_wally_help() -> str:
+        """Format Wally whale tracker help message"""
+        return """<b>🐋 Wally Whale Tracker Commands</b>
 
 <b>📊 View Commands:</b>
 /whales - List all tracked whales
-/help - Show this help message
+/wally - Show this help menu
 
 <b>⚙️ Management Commands (Admin Only):</b>
 /addwhale &lt;label&gt; &lt;address&gt; - Add new whale
