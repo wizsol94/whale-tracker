@@ -22,24 +22,11 @@ class TransactionParser:
     @staticmethod
     def fetch_token_metadata(token_mint: str) -> Dict:
         """
-        Fetch token metadata from Jupiter API or DexScreener
+        Fetch token metadata from DexScreener or Jupiter API
         Returns symbol and name
         """
+        # Try DexScreener FIRST (more accurate for pump.fun tokens)
         try:
-            # Try Jupiter API first
-            url = f"https://tokens.jup.ag/token/{token_mint}"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    'symbol': data.get('symbol', 'UNKNOWN'),
-                    'name': data.get('name', None)
-                }
-        except Exception as e:
-            logger.debug(f"Jupiter API failed for {token_mint}: {e}")
-        
-        try:
-            # Try DexScreener as backup
             url = f"https://api.dexscreener.com/latest/dex/tokens/{token_mint}"
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
@@ -47,14 +34,35 @@ class TransactionParser:
                 if data.get('pairs') and len(data['pairs']) > 0:
                     pair = data['pairs'][0]
                     base_token = pair.get('baseToken', {})
-                    return {
-                        'symbol': base_token.get('symbol', 'UNKNOWN'),
-                        'name': base_token.get('name', None)
-                    }
+                    symbol = base_token.get('symbol', 'UNKNOWN')
+                    name = base_token.get('name', None)
+                    if symbol != 'UNKNOWN':
+                        logger.debug(f"Got token from DexScreener: {symbol}")
+                        return {
+                            'symbol': symbol,
+                            'name': name
+                        }
         except Exception as e:
             logger.debug(f"DexScreener API failed for {token_mint}: {e}")
         
+        # Try Jupiter API as backup
+        try:
+            url = f"https://tokens.jup.ag/token/{token_mint}"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                symbol = data.get('symbol', 'UNKNOWN')
+                if symbol != 'UNKNOWN':
+                    logger.debug(f"Got token from Jupiter: {symbol}")
+                    return {
+                        'symbol': symbol,
+                        'name': data.get('name', None)
+                    }
+        except Exception as e:
+            logger.debug(f"Jupiter API failed for {token_mint}: {e}")
+        
         # Fallback to shortened mint address
+        logger.warning(f"Could not fetch token metadata for {token_mint}, using mint prefix")
         return {
             'symbol': token_mint[:6],
             'name': None
