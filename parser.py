@@ -120,7 +120,18 @@ class TransactionParser:
                 
                 logger.debug(f"  📦 Token: {mint[:8]}... | From: {from_addr[:8]}... | To: {to_addr[:8]}... | Amount: {amount}")
                 
-                # Track changes for our whale
+                # CRITICAL FIX: Treat WSOL (wrapped SOL) as SOL, not as a token
+                if mint in [SOL_MINT, WSOL_MINT]:
+                    logger.debug(f"    💰 This is WSOL - treating as SOL transfer")
+                    if from_addr == whale_address:
+                        whale_sol_change -= amount
+                        logger.debug(f"    ➡️ Whale SENT {amount} SOL (via WSOL)")
+                    elif to_addr == whale_address:
+                        whale_sol_change += amount
+                        logger.debug(f"    ⬅️ Whale RECEIVED {amount} SOL (via WSOL)")
+                    continue  # Skip adding to token changes
+                
+                # Track changes for our whale (non-SOL tokens only)
                 if from_addr == whale_address:
                     # Whale sent token (negative change)
                     whale_token_changes.append({
@@ -170,11 +181,6 @@ class TransactionParser:
             token_decimals = main_token['decimals']
             
             logger.debug(f"  🎯 Main token: {token_mint[:8]}... | Change: {token_change}")
-            
-            # Skip if token mint is SOL/WSOL (we're tracking it separately)
-            if token_mint in [SOL_MINT, WSOL_MINT]:
-                logger.debug(f"❌ FILTER: Skipping SOL/WSOL token transfer: {signature[:16]}...")
-                return None
             
             # Determine trade type
             trade_type = None
