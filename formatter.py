@@ -21,6 +21,7 @@ class MessageFormatter:
         Returns: {market_cap, age_hours, age_days}
         """
         try:
+            logger.debug(f"🌐 Fetching market data from DexScreener for {token_mint[:8]}...")
             url = f"https://api.dexscreener.com/latest/dex/tokens/{token_mint}"
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
@@ -30,6 +31,7 @@ class MessageFormatter:
                     
                     # Get market cap
                     market_cap = pair.get('fdv') or pair.get('marketCap', 0)
+                    logger.debug(f"  📊 Market cap: ${market_cap}")
                     
                     # Get token creation time
                     pair_created_at = pair.get('pairCreatedAt')
@@ -43,17 +45,23 @@ class MessageFormatter:
                             age_delta = current_time - created_time
                             age_hours = int(age_delta.total_seconds() / 3600)
                             age_days = int(age_delta.days)
-                        except:
-                            pass
+                            logger.debug(f"  ⏰ Token age: {age_days}d {age_hours % 24}h")
+                        except Exception as e:
+                            logger.debug(f"  ⚠️ Could not parse token age: {e}")
                     
                     return {
                         'market_cap': market_cap,
                         'age_hours': age_hours,
                         'age_days': age_days
                     }
+                else:
+                    logger.debug(f"  ⚠️ No pairs found in DexScreener response")
+            else:
+                logger.debug(f"  ⚠️ DexScreener returned status {response.status_code}")
         except Exception as e:
-            logger.debug(f"Could not fetch market data for {token_mint}: {e}")
+            logger.debug(f"  ❌ DexScreener API error: {e}")
         
+        logger.debug(f"  ⚠️ Returning empty market data")
         return {'market_cap': None, 'age_hours': None, 'age_days': None}
     
     @staticmethod
