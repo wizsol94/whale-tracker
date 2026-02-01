@@ -55,13 +55,13 @@ class WhaleTrackerBot:
         
         # Add command handlers
         self.application.add_handler(CommandHandler("whales", self.cmd_whales))
+        self.application.add_handler(CommandHandler("wally", self.cmd_wally))
         self.application.add_handler(CommandHandler("addwhale", self.cmd_add_whale))
         self.application.add_handler(CommandHandler("removewhale", self.cmd_remove_whale))
         self.application.add_handler(CommandHandler("pausewhale", self.cmd_pause_whale))
         self.application.add_handler(CommandHandler("resumewhale", self.cmd_resume_whale))
         self.application.add_handler(CommandHandler("pauseall", self.cmd_pause_all))
         self.application.add_handler(CommandHandler("resumeall", self.cmd_resume_all))
-        self.application.add_handler(CommandHandler("help", self.cmd_help))
         
         logger.info("Bot initialized")
         if TELEGRAM_THREAD_ID:
@@ -253,9 +253,9 @@ class WhaleTrackerBot:
         await update.message.reply_text(f"✅ Resumed all {count} whales")
         logger.info(f"Admin {user_id} resumed all whales")
     
-    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /help command"""
-        message = formatter.format_help_message()
+    async def cmd_wally(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /wally command - Show Wally whale tracker help"""
+        message = formatter.format_wally_help()
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
     
     def run_telegram_bot(self):
