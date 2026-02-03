@@ -110,8 +110,10 @@ class TransactionParser:
             # Find balance changes for our whale
             whale_token_changes = []
             whale_sol_change = Decimal('0')
+            wsol_received = Decimal('0')  # Track WSOL to avoid double-counting
+            wsol_sent = Decimal('0')
             
-            # Parse token transfers
+            # Parse token transfers FIRST
             for transfer in token_transfers:
                 from_addr = transfer.get('fromUserAccount', '')
                 to_addr = transfer.get('toUserAccount', '')
@@ -125,9 +127,11 @@ class TransactionParser:
                     logger.debug(f"    💰 This is WSOL - treating as SOL transfer")
                     if from_addr == whale_address:
                         whale_sol_change -= amount
+                        wsol_sent += amount
                         logger.debug(f"    ➡️ Whale SENT {amount} SOL (via WSOL)")
                     elif to_addr == whale_address:
                         whale_sol_change += amount
+                        wsol_received += amount
                         logger.debug(f"    ⬅️ Whale RECEIVED {amount} SOL (via WSOL)")
                     continue  # Skip adding to token changes
                 
@@ -156,6 +160,16 @@ class TransactionParser:
                 amount = Decimal(str(transfer.get('amount', 0))) / Decimal('1000000000')  # Convert lamports to SOL
                 
                 logger.debug(f"  💰 SOL: From: {from_addr[:8]}... | To: {to_addr[:8]}... | Amount: {amount} SOL")
+                
+                # CRITICAL FIX: Skip native SOL that matches WSOL unwraps (double-counting prevention)
+                # When WSOL is unwrapped, it creates both a WSOL token transfer AND a native SOL transfer
+                # We already counted the WSOL, so skip the matching native SOL
+                if to_addr == whale_address and amount == wsol_received:
+                    logger.debug(f"    ⚠️ SKIPPING - This is WSOL unwrap already counted")
+                    continue
+                if from_addr == whale_address and amount == wsol_sent:
+                    logger.debug(f"    ⚠️ SKIPPING - This is WSOL wrap already counted")
+                    continue
                 
                 if from_addr == whale_address:
                     whale_sol_change -= amount
