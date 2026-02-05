@@ -10,26 +10,24 @@ from typing import Dict, Callable, Set
 
 logger = logging.getLogger(__name__)
 
+# Import database to get whale addresses
+from database import Database
 
 class HeliusWebhookHandler:
     
-    def __init__(self, on_transaction: Callable, known_whales: Set[str] = None):
+    def __init__(self, on_transaction: Callable):
         """
         Initialize webhook handler
-        
-        Args:
-            on_transaction: Async callback function to process transactions
-                           Signature: async def callback(tx_data: Dict, whale_address: str)
-            known_whales: Set of known whale addresses to match against
         """
         self.on_transaction = on_transaction
-        self.known_whales = known_whales or set()
         self.app = Flask(__name__)
+        self.db = Database()
         self.setup_routes()
     
-    def update_known_whales(self, whale_addresses: Set[str]):
-        """Update the set of known whale addresses"""
-        self.known_whales = whale_addresses
+    def _get_whale_addresses(self) -> Set[str]:
+        """Get all tracked whale addresses from database"""
+        whales = self.db.get_all_whales()
+        return {w['address'] for w in whales}
     
     def setup_routes(self):
         """Setup Flask routes"""
@@ -54,14 +52,18 @@ class HeliusWebhookHandler:
                 
                 logger.info(f"Received {len(transactions)} transaction(s) from Helius")
                 
-                # Process each transaction asynchronously
+                # Get current whale addresses
+                whale_addresses = self._get_whale_addresses()
+                logger.info(f"Tracking {len(whale_addresses)} whale addresses")
+                
+                # Process each transaction
                 for tx in transactions:
-                    # Get the wallet address this webhook is for
-                    # Helius includes this in the webhook data
-                    whale_address = self._extract_whale_address(tx)
+                    # Find which whale this transaction belongs to
+                    whale_address = self._find_whale_in_transaction(tx, whale_addresses)
                     
                     if whale_address:
-                        # Process in background using thread to avoid event loop issues
+                        logger.info(f"✅ Found whale {whale_address[:12]}... in transaction")
+                        # Process in background using thread
                         import threading
                         thread = threading.Thread(
                             target=lambda t=tx, w=whale_address: asyncio.run(self.on_transaction(t, w)),
@@ -69,7 +71,9 @@ class HeliusWebhookHandler:
                         )
                         thread.start()
                     else:
-                        logger.warning("Could not extract whale address from transaction")
+                        # Log what addresses we found for debugging
+                        found_addresses = self._get_all_addresses_in_tx(tx)
+                        logger.warning(f"No known whale found. Addresses in transaction: {[a[:10]+'...' for a in found_addresses[:10]]}")
                 
                 return jsonify({'status': 'received'}), 200
                 
@@ -77,70 +81,46 @@ class HeliusWebhookHandler:
                 logger.error(f"Error processing webhook: {e}", exc_info=True)
                 return jsonify({'error': 'Internal error'}), 500
     
-    def _extract_whale_address(self, tx_data: Dict) -> str:
+    def _get_all_addresses_in_tx(self, tx_data: Dict) -> list:
+        """Get all addresses mentioned in a transaction"""
+        addresses = set()
+        
+        # From accountData
+        for account in tx_data.get('accountData', []):
+            if account.get('account'):
+                addresses.add(account['account'])
+        
+        # From native transfers
+        for transfer in tx_data.get('nativeTransfers', []):
+            if transfer.get('fromUserAccount'):
+                addresses.add(transfer['fromUserAccount'])
+            if transfer.get('toUserAccount'):
+                addresses.add(transfer['toUserAccount'])
+        
+        # From token transfers
+        for transfer in tx_data.get('tokenTransfers', []):
+            if transfer.get('fromUserAccount'):
+                addresses.add(transfer['fromUserAccount'])
+            if transfer.get('toUserAccount'):
+                addresses.add(transfer['toUserAccount'])
+        
+        # From fee payer
+        if tx_data.get('feePayer'):
+            addresses.add(tx_data['feePayer'])
+        
+        return list(addresses)
+    
+    def _find_whale_in_transaction(self, tx_data: Dict, whale_addresses: Set[str]) -> str:
         """
-        Extract the monitored wallet address from transaction
-        Matches against known whale addresses from database
+        Find if any of our tracked whales are in this transaction
         """
-        try:
-            # Collect all addresses from the transaction
-            all_addresses = set()
-            
-            # Method 1: Get fee payer (usually the transaction signer/whale)
-            fee_payer = tx_data.get('feePayer')
-            if fee_payer:
-                all_addresses.add(fee_payer)
-            
-            # Method 2: Check account data for addresses with balance changes
-            account_data = tx_data.get('accountData', [])
-            for account in account_data:
-                addr = account.get('account')
-                if addr:
-                    all_addresses.add(addr)
-            
-            # Method 3: Check native transfers
-            native_transfers = tx_data.get('nativeTransfers', [])
-            for transfer in native_transfers:
-                from_addr = transfer.get('fromUserAccount')
-                to_addr = transfer.get('toUserAccount')
-                if from_addr:
-                    all_addresses.add(from_addr)
-                if to_addr:
-                    all_addresses.add(to_addr)
-            
-            # Method 4: Check token transfers
-            token_transfers = tx_data.get('tokenTransfers', [])
-            for transfer in token_transfers:
-                from_addr = transfer.get('fromUserAccount')
-                to_addr = transfer.get('toUserAccount')
-                if from_addr:
-                    all_addresses.add(from_addr)
-                if to_addr:
-                    all_addresses.add(to_addr)
-            
-            # Method 5: Check transaction signature accounts
-            transaction = tx_data.get('transaction', {})
-            message = transaction.get('message', {})
-            account_keys = message.get('accountKeys', [])
-            for account_key in account_keys:
-                if isinstance(account_key, dict):
-                    pubkey = account_key.get('pubkey')
-                    if pubkey:
-                        all_addresses.add(pubkey)
-                elif isinstance(account_key, str):
-                    all_addresses.add(account_key)
-            
-            # Match against known whales
-            for addr in all_addresses:
-                if addr in self.known_whales:
-                    logger.info(f"Matched whale address: {addr[:8]}...")
-                    return addr
-            
-            # If no match found, log all addresses for debugging
-            logger.warning(f"No known whale found. Addresses in transaction: {[addr[:8] + '...' for addr in all_addresses if addr]}")
-            
-        except Exception as e:
-            logger.error(f"Error extracting whale address: {e}", exc_info=True)
+        # Get all addresses in the transaction
+        tx_addresses = self._get_all_addresses_in_tx(tx_data)
+        
+        # Check if any match our whales
+        for addr in tx_addresses:
+            if addr in whale_addresses:
+                return addr
         
         return None
     
