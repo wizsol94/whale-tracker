@@ -6,6 +6,7 @@ Supports multiple isolated groups with owner-only controls
 import os
 import logging
 import asyncio
+from datetime import datetime
 from telegram import Update, Bot
 from telegram.ext import (
     Application,
@@ -23,6 +24,10 @@ from auth_manager import AuthManager
 from parser import TransactionParser
 from formatter import MessageFormatter
 from helius_handler import HeliusWebhookHandler
+
+# BUILD VERIFICATION
+BUILD_ID = "2026-02-04-23:45:00-MULTICHAT-FIX"
+BUILD_TIMESTAMP = datetime.now().isoformat()
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -56,6 +61,7 @@ class MultiChatWhaleBot:
         
         self.application.add_handler(CommandHandler("start", self.cmd_start, filters=auth_filter))
         self.application.add_handler(CommandHandler("help", self.cmd_help, filters=auth_filter))
+        self.application.add_handler(CommandHandler("version", self.cmd_version, filters=auth_filter))
         self.application.add_handler(CommandHandler("status", self.cmd_status, filters=auth_filter))
         self.application.add_handler(CommandHandler("getchatid", self.cmd_get_chat_id, filters=auth_filter))
         self.application.add_handler(CommandHandler("whales", self.cmd_whales, filters=auth_filter))
@@ -144,6 +150,32 @@ class MultiChatWhaleBot:
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
         message = formatter.format_help_message()
+        await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+    
+    async def cmd_version(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /version command - show build info and DB status"""
+        chat_id = update.effective_chat.id
+        
+        # Get DB fingerprint
+        db_info = db.get_db_fingerprint()
+        
+        message = (
+            f"🔧 <b>Wally Version Info</b>\n\n"
+            f"<b>Build ID:</b> <code>{BUILD_ID}</code>\n"
+            f"<b>Started:</b> {BUILD_TIMESTAMP[:19]}\n"
+            f"<b>Environment:</b> Railway\n\n"
+            f"<b>Database:</b>\n"
+            f"  Name: <code>{db_info['database']}</code>\n"
+            f"  Host: <code>{db_info['host']}</code>\n"
+            f"  Port: <code>{db_info['port']}</code>\n"
+            f"  Status: {db_info['status']}\n\n"
+            f"<b>Your Chat ID:</b> <code>{chat_id}</code>\n"
+            f"<b>Whales in DB:</b> {db_info['total_whales']} total\n"
+            f"<b>Whales in this chat:</b> {db_info['chat_whale_count'].get(chat_id, 0)}"
+        )
+        
+        logger.info(f"[CMD_VERSION] chat_id={chat_id}, build={BUILD_ID}, db={db_info['database']}")
+        
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
     
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -325,6 +357,13 @@ def main():
     """Main entry point"""
     import nest_asyncio
     nest_asyncio.apply()
+    
+    # Log build info
+    logger.info("=" * 60)
+    logger.info(f"🚀 WALLY WHALE TRACKER STARTING")
+    logger.info(f"📦 BUILD_ID: {BUILD_ID}")
+    logger.info(f"🕐 BUILD_TIMESTAMP: {BUILD_TIMESTAMP}")
+    logger.info("=" * 60)
     
     if not TELEGRAM_BOT_TOKEN or not os.getenv('DATABASE_URL') or not os.getenv('OWNER_TELEGRAM_USER_ID'):
         logger.error("Missing required environment variables!")
