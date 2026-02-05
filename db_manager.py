@@ -19,6 +19,20 @@ class DatabaseManager:
         self.database_url = os.getenv('DATABASE_URL')
         if not self.database_url:
             raise ValueError("DATABASE_URL environment variable not set!")
+        
+        # Log DB connection info (safe)
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self.database_url)
+            cursor = conn.cursor()
+            cursor.execute("SELECT current_database(), version()")
+            db_name, version = cursor.fetchone()
+            logger.info(f"✅ DB connected OK: database={db_name}, version={version[:50]}")
+            conn.close()
+        except Exception as e:
+            logger.error(f"❌ DB connection test failed: {e}")
+            raise
+        
         self._init_schema()
         logger.info("Database manager initialized")
     
@@ -79,6 +93,13 @@ class DatabaseManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_whales_address ON whales(address)")
             
             conn.commit()
+            
+            # Startup diagnostic: count whales
+            cursor.execute("SELECT COUNT(*) FROM whales")
+            total_whales = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM whales")
+            distinct_chats = cursor.fetchone()[0]
+            logger.info(f"[STARTUP] Total whales in DB: {total_whales} across {distinct_chats} chats")
     
     def get_or_create_chat_settings(self, chat_id: int, chat_name: str = None) -> Dict:
         """Get or create settings for a chat"""
@@ -113,26 +134,57 @@ class DatabaseManager:
     
     def add_whale(self, chat_id: int, label: str, address: str) -> bool:
         """Add a whale for a specific chat"""
+        logger.info(f"[ADD_WHALE] chat_id={chat_id}, label={label}, address={address[:20]}...")
+        
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
+                
+                # Check if whale already exists FOR THIS CHAT
                 cursor.execute(
-                    "INSERT INTO whales (chat_id, label, address, active) VALUES (%s, %s, %s, TRUE)",
+                    "SELECT id FROM whales WHERE chat_id = %s AND (label = %s OR address = %s)",
                     (chat_id, label, address)
                 )
+                existing = cursor.fetchone()
+                
+                if existing:
+                    logger.warning(f"[ADD_WHALE] Whale already exists in chat {chat_id}: label={label}")
+                    return False
+                
+                # Insert new whale
+                cursor.execute(
+                    "INSERT INTO whales (chat_id, label, address, active) VALUES (%s, %s, %s, TRUE) RETURNING id",
+                    (chat_id, label, address)
+                )
+                whale_id = cursor.fetchone()[0]
+                logger.info(f"[ADD_WHALE] ✅ Successfully added whale id={whale_id} for chat {chat_id}")
                 return True
-        except psycopg2.IntegrityError:
+                
+        except psycopg2.IntegrityError as e:
+            logger.error(f"[ADD_WHALE] ❌ Integrity error for chat {chat_id}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"[ADD_WHALE] ❌ Unexpected error: {e}", exc_info=True)
             return False
     
     def get_whales_for_chat(self, chat_id: int) -> List[Dict]:
         """Get all whales for a specific chat"""
+        logger.info(f"[GET_WHALES] Querying whales for chat_id={chat_id}")
+        
         with self.get_connection() as conn:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(
                 "SELECT * FROM whales WHERE chat_id = %s ORDER BY added_at DESC",
                 (chat_id,)
             )
-            return [dict(row) for row in cursor.fetchall()]
+            results = [dict(row) for row in cursor.fetchall()]
+            logger.info(f"[GET_WHALES] ✅ Found {len(results)} whales for chat_id={chat_id}")
+            
+            # Log each whale for debugging
+            for whale in results:
+                logger.info(f"[GET_WHALES]   - {whale['label']}: {whale['address'][:20]}... (active={whale['active']})")
+            
+            return results
     
     def get_whale_by_address(self, address: str) -> List[Dict]:
         """Get all chats tracking this whale address"""
