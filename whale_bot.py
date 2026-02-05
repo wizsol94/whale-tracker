@@ -179,8 +179,15 @@ class MultiChatWhaleBot:
     async def cmd_whales(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /whales command"""
         chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        
+        logger.info(f"[CMD_WHALES] chat_id={chat_id}, user_id={user_id}")
+        
         whales = db.get_whales_for_chat(chat_id)
         message = formatter.format_whales_list(whales)
+        
+        logger.info(f"[CMD_WHALES] Returning {len(whales)} whales to user")
+        
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
     
     async def cmd_add_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,17 +196,32 @@ class MultiChatWhaleBot:
             await update.message.reply_text("⛔ Only the owner can change Wally settings")
             return
         
-        if len(context.args) < 2:
-            await update.message.reply_text("Usage: /addwhale <label> <address>")
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        
+        # Clean args: remove duplicate command tokens
+        args = [arg for arg in context.args if not arg.startswith('/')]
+        
+        logger.info(f"[CMD_ADDWHALE] chat_id={chat_id}, user_id={user_id}, args={args}")
+        
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: /addwhale <label> <address>\n"
+                "Example: /addwhale Gake DNfuF1L6..."
+            )
             return
         
-        chat_id = update.effective_chat.id
-        label, address = context.args[0], context.args[1]
+        label = args[0]
+        address = args[1]
+        
+        logger.info(f"[CMD_ADDWHALE] Attempting to add: label={label}, address={address[:20]}...")
         
         if db.add_whale(chat_id, label, address):
             await update.message.reply_text(f"✅ Added whale: {label}")
+            logger.info(f"[CMD_ADDWHALE] ✅ Success: {label} added to chat {chat_id}")
         else:
-            await update.message.reply_text(f"❌ Whale already exists")
+            await update.message.reply_text(f"❌ Whale already exists in this chat")
+            logger.warning(f"[CMD_ADDWHALE] ❌ Failed: {label} already exists in chat {chat_id}")
     
     async def cmd_remove_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /removewhale command (owner only)"""
