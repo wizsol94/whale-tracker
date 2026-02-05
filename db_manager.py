@@ -101,6 +101,34 @@ class DatabaseManager:
             distinct_chats = cursor.fetchone()[0]
             logger.info(f"[STARTUP] Total whales in DB: {total_whales} across {distinct_chats} chats")
     
+    def get_db_fingerprint(self) -> Dict:
+        """Get database fingerprint for verification"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get DB connection info
+            cursor.execute("SELECT current_database(), inet_server_addr()::text, inet_server_port()")
+            db_name, host, port = cursor.fetchone()
+            
+            # Get whale counts
+            cursor.execute("SELECT COUNT(*) FROM whales")
+            total_whales = cursor.fetchone()[0]
+            
+            # Get per-chat counts
+            cursor.execute("SELECT chat_id, COUNT(*) FROM whales GROUP BY chat_id")
+            chat_counts = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            logger.info(f"[DB_FINGERPRINT] db={db_name}, host={host}, port={port}, total_whales={total_whales}")
+            
+            return {
+                'database': db_name,
+                'host': host or 'unix_socket',
+                'port': port or 'N/A',
+                'status': '✅ Connected',
+                'total_whales': total_whales,
+                'chat_whale_count': chat_counts
+            }
+    
     def get_or_create_chat_settings(self, chat_id: int, chat_name: str = None) -> Dict:
         """Get or create settings for a chat"""
         with self.get_connection() as conn:
@@ -134,34 +162,56 @@ class DatabaseManager:
     
     def add_whale(self, chat_id: int, label: str, address: str) -> bool:
         """Add a whale for a specific chat"""
-        logger.info(f"[ADD_WHALE] chat_id={chat_id}, label={label}, address={address[:20]}...")
+        logger.info(f"[ADD_WHALE] ===== START =====")
+        logger.info(f"[ADD_WHALE] chat_id={chat_id} (type: {type(chat_id).__name__})")
+        logger.info(f"[ADD_WHALE] label={label}")
+        logger.info(f"[ADD_WHALE] address={address[:30]}...")
+        logger.info(f"[ADD_WHALE] table=whales")
         
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
                 # Check if whale already exists FOR THIS CHAT
-                cursor.execute(
-                    "SELECT id FROM whales WHERE chat_id = %s AND (label = %s OR address = %s)",
-                    (chat_id, label, address)
-                )
+                check_query = "SELECT id, label FROM whales WHERE chat_id = %s AND (label = %s OR address = %s)"
+                logger.info(f"[ADD_WHALE] CHECK query: {check_query}")
+                logger.info(f"[ADD_WHALE] CHECK params: chat_id={chat_id}, label={label}, address={address[:20]}...")
+                
+                cursor.execute(check_query, (chat_id, label, address))
                 existing = cursor.fetchone()
                 
+                logger.info(f"[ADD_WHALE] CHECK result: {'FOUND' if existing else 'NOT FOUND'} ({existing})")
+                
                 if existing:
-                    logger.warning(f"[ADD_WHALE] Whale already exists in chat {chat_id}: label={label}")
+                    logger.warning(f"[ADD_WHALE] ❌ Whale already exists in chat {chat_id}: {existing}")
                     return False
                 
                 # Insert new whale
-                cursor.execute(
-                    "INSERT INTO whales (chat_id, label, address, active) VALUES (%s, %s, %s, TRUE) RETURNING id",
-                    (chat_id, label, address)
-                )
+                insert_query = "INSERT INTO whales (chat_id, label, address, active) VALUES (%s, %s, %s, TRUE) RETURNING id"
+                logger.info(f"[ADD_WHALE] INSERT query: {insert_query}")
+                
+                cursor.execute(insert_query, (chat_id, label, address))
                 whale_id = cursor.fetchone()[0]
-                logger.info(f"[ADD_WHALE] ✅ Successfully added whale id={whale_id} for chat {chat_id}")
+                
+                logger.info(f"[ADD_WHALE] ✅ INSERT successful: whale_id={whale_id}")
+                
+                # IMMEDIATE VERIFICATION
+                cursor.execute("SELECT COUNT(*) FROM whales WHERE chat_id = %s", (chat_id,))
+                count_after = cursor.fetchone()[0]
+                logger.info(f"[ADD_WHALE] VERIFY: Total whales for chat_id={chat_id} is now {count_after}")
+                
+                # List all whales for this chat
+                cursor.execute("SELECT id, label, address FROM whales WHERE chat_id = %s", (chat_id,))
+                all_whales = cursor.fetchall()
+                logger.info(f"[ADD_WHALE] VERIFY: All whales in chat {chat_id}:")
+                for w in all_whales:
+                    logger.info(f"[ADD_WHALE]   - id={w[0]}, label={w[1]}, addr={w[2][:20]}...")
+                
+                logger.info(f"[ADD_WHALE] ===== SUCCESS =====")
                 return True
                 
         except psycopg2.IntegrityError as e:
-            logger.error(f"[ADD_WHALE] ❌ Integrity error for chat {chat_id}: {e}")
+            logger.error(f"[ADD_WHALE] ❌ Integrity error: {e}")
             return False
         except Exception as e:
             logger.error(f"[ADD_WHALE] ❌ Unexpected error: {e}", exc_info=True)
@@ -169,21 +219,38 @@ class DatabaseManager:
     
     def get_whales_for_chat(self, chat_id: int) -> List[Dict]:
         """Get all whales for a specific chat"""
-        logger.info(f"[GET_WHALES] Querying whales for chat_id={chat_id}")
+        logger.info(f"[GET_WHALES] ===== START =====")
+        logger.info(f"[GET_WHALES] chat_id={chat_id} (type: {type(chat_id).__name__})")
+        logger.info(f"[GET_WHALES] table=whales")
+        
+        query = "SELECT * FROM whales WHERE chat_id = %s ORDER BY added_at DESC"
+        logger.info(f"[GET_WHALES] query: {query}")
+        logger.info(f"[GET_WHALES] WHERE clause: chat_id = {chat_id}")
         
         with self.get_connection() as conn:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute(
-                "SELECT * FROM whales WHERE chat_id = %s ORDER BY added_at DESC",
-                (chat_id,)
-            )
+            cursor.execute(query, (chat_id,))
             results = [dict(row) for row in cursor.fetchall()]
+            
+            logger.info(f"[GET_WHALES] rows_returned={len(results)}")
             logger.info(f"[GET_WHALES] ✅ Found {len(results)} whales for chat_id={chat_id}")
             
-            # Log each whale for debugging
-            for whale in results:
-                logger.info(f"[GET_WHALES]   - {whale['label']}: {whale['address'][:20]}... (active={whale['active']})")
+            # Log each whale
+            for i, whale in enumerate(results):
+                logger.info(f"[GET_WHALES] whale[{i}]: id={whale['id']}, label={whale['label']}, addr={whale['address'][:20]}..., active={whale['active']}")
             
+            if len(results) == 0:
+                # Double-check: are there ANY whales in the table?
+                cursor.execute("SELECT COUNT(*) FROM whales")
+                total = cursor.fetchone()[0]
+                logger.warning(f"[GET_WHALES] No whales for this chat, but {total} total whales exist in DB")
+                
+                # Show what chat_ids DO have whales
+                cursor.execute("SELECT DISTINCT chat_id FROM whales")
+                existing_chats = [row[0] for row in cursor.fetchall()]
+                logger.warning(f"[GET_WHALES] Chats with whales: {existing_chats}")
+            
+            logger.info(f"[GET_WHALES] ===== END =====")
             return results
     
     def get_whale_by_address(self, address: str) -> List[Dict]:
