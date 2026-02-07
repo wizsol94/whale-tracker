@@ -1,6 +1,6 @@
 """
 Solana Whale Tracker Bot for WizTheoryLabs
-LOCKED TO WHALE TRACKING CHANNEL ONLY
+LOCKED TO WHALE-TRACKING THREAD ONLY (Thread ID: 164)
 """
 
 import os
@@ -30,12 +30,10 @@ logger = logging.getLogger(__name__)
 
 # Configuration from environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')  # Whale Tracking channel
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')  # Group ID: -1003004536161
+TELEGRAM_THREAD_ID = int(os.getenv('TELEGRAM_THREAD_ID', '164'))  # Whale-Tracking thread
 ADMIN_USER_IDS = [int(id.strip()) for id in os.getenv('ADMIN_USER_IDS', '').split(',') if id.strip()]
 WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', 5000))
-
-# STRICT CHANNEL LOCK - Wally ONLY works in this channel
-ALLOWED_CHANNEL_ID = int(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
 
 # Initialize components
 db = Database()
@@ -50,15 +48,21 @@ class WhaleTrackerBot:
         self.application = None
         self.rate_limiter = asyncio.Semaphore(20)
     
-    def _is_allowed_channel(self, update: Update) -> bool:
-        """Check if message is from the allowed Whale Tracking channel"""
+    def _is_whale_tracking_thread(self, update: Update) -> bool:
+        """Check if message is from the Whale-Tracking thread ONLY"""
         if not update.effective_chat:
             return False
         
         chat_id = update.effective_chat.id
+        thread_id = update.message.message_thread_id if update.message else None
         
-        if chat_id != ALLOWED_CHANNEL_ID:
-            logger.debug(f"Ignoring command from unauthorized chat: {chat_id}")
+        # Must be correct group AND correct thread (164 = Whale-Tracking)
+        if str(chat_id) != TELEGRAM_CHAT_ID:
+            logger.debug(f"Ignoring - wrong group: {chat_id}")
+            return False
+        
+        if thread_id != TELEGRAM_THREAD_ID:
+            logger.debug(f"Ignoring - wrong thread: {thread_id} (expected {TELEGRAM_THREAD_ID})")
             return False
         
         return True
@@ -68,7 +72,7 @@ class WhaleTrackerBot:
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         self.bot = self.application.bot
         
-        # Add command handlers - ALL check channel before responding
+        # Add command handlers
         self.application.add_handler(CommandHandler("whales", self.cmd_whales))
         self.application.add_handler(CommandHandler("addwhale", self.cmd_add_whale))
         self.application.add_handler(CommandHandler("removewhale", self.cmd_remove_whale))
@@ -80,7 +84,8 @@ class WhaleTrackerBot:
         self.application.add_handler(CommandHandler("status", self.cmd_status))
         self.application.add_handler(CommandHandler("wally", self.cmd_help))
         
-        logger.info(f"Bot initialized - LOCKED to channel: {ALLOWED_CHANNEL_ID}")
+        logger.info(f"Bot initialized")
+        logger.info(f"🔒 LOCKED TO: Chat {TELEGRAM_CHAT_ID} | Thread {TELEGRAM_THREAD_ID} (Whale-Tracking)")
     
     async def process_transaction(self, tx_data: dict, whale_address: str):
         """Process incoming transaction from Helius webhook"""
@@ -107,17 +112,18 @@ class WhaleTrackerBot:
             
             message, reply_markup = formatter.format_trade_message(trade, whale['label'])
             
-            # ONLY send to the Whale Tracking channel
+            # SEND TO WHALE-TRACKING THREAD ONLY (thread_id=164)
             async with self.rate_limiter:
                 try:
                     await self.bot.send_message(
-                        chat_id=ALLOWED_CHANNEL_ID,  # LOCKED to this channel
+                        chat_id=TELEGRAM_CHAT_ID,
                         text=message,
                         parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup,
-                        disable_web_page_preview=True
+                        disable_web_page_preview=True,
+                        message_thread_id=TELEGRAM_THREAD_ID  # <-- THIS IS THE KEY FIX!
                     )
-                    logger.info(f"Posted {trade['type']} alert for {whale['label']} to channel {ALLOWED_CHANNEL_ID}")
+                    logger.info(f"✅ Posted {trade['type']} alert for {whale['label']} to Whale-Tracking thread")
                 except TelegramError as e:
                     logger.error(f"Failed to send Telegram message: {e}")
                     return
@@ -129,9 +135,8 @@ class WhaleTrackerBot:
     
     async def cmd_whales(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /whales command"""
-        # CHECK CHANNEL FIRST
-        if not self._is_allowed_channel(update):
-            return  # Silently ignore
+        if not self._is_whale_tracking_thread(update):
+            return  # Silently ignore if not in Whale-Tracking thread
         
         whales = db.get_all_whales()
         message = self._format_whales_list(whales)
@@ -139,9 +144,8 @@ class WhaleTrackerBot:
     
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /status command"""
-        # CHECK CHANNEL FIRST
-        if not self._is_allowed_channel(update):
-            return  # Silently ignore
+        if not self._is_whale_tracking_thread(update):
+            return
         
         whales = db.get_all_whales()
         active = sum(1 for w in whales if w['active'])
@@ -149,16 +153,15 @@ class WhaleTrackerBot:
         message = (
             f"🐋 <b>Wally Status</b>\n\n"
             f"📊 Tracking: {len(whales)} whales ({active} active)\n"
-            f"📍 Channel: Locked ✅\n"
+            f"📍 Thread: Whale-Tracking (ID: {TELEGRAM_THREAD_ID}) ✅\n"
             f"🔔 Alerts: {'ON' if active > 0 else 'OFF'}"
         )
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
     
     async def cmd_add_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /addwhale command (admin only)"""
-        # CHECK CHANNEL FIRST
-        if not self._is_allowed_channel(update):
-            return  # Silently ignore
+        if not self._is_whale_tracking_thread(update):
+            return
         
         user_id = update.effective_user.id
         
@@ -184,9 +187,8 @@ class WhaleTrackerBot:
     
     async def cmd_remove_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /removewhale command (admin only)"""
-        # CHECK CHANNEL FIRST
-        if not self._is_allowed_channel(update):
-            return  # Silently ignore
+        if not self._is_whale_tracking_thread(update):
+            return
         
         user_id = update.effective_user.id
         
@@ -211,9 +213,8 @@ class WhaleTrackerBot:
     
     async def cmd_pause_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /pausewhale command (admin only)"""
-        # CHECK CHANNEL FIRST
-        if not self._is_allowed_channel(update):
-            return  # Silently ignore
+        if not self._is_whale_tracking_thread(update):
+            return
         
         user_id = update.effective_user.id
         
@@ -238,9 +239,8 @@ class WhaleTrackerBot:
     
     async def cmd_resume_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /resumewhale command (admin only)"""
-        # CHECK CHANNEL FIRST
-        if not self._is_allowed_channel(update):
-            return  # Silently ignore
+        if not self._is_whale_tracking_thread(update):
+            return
         
         user_id = update.effective_user.id
         
@@ -265,9 +265,8 @@ class WhaleTrackerBot:
     
     async def cmd_pause_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /pauseall command (admin only)"""
-        # CHECK CHANNEL FIRST
-        if not self._is_allowed_channel(update):
-            return  # Silently ignore
+        if not self._is_whale_tracking_thread(update):
+            return
         
         user_id = update.effective_user.id
         
@@ -281,9 +280,8 @@ class WhaleTrackerBot:
     
     async def cmd_resume_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /resumeall command (admin only)"""
-        # CHECK CHANNEL FIRST
-        if not self._is_allowed_channel(update):
-            return  # Silently ignore
+        if not self._is_whale_tracking_thread(update):
+            return
         
         user_id = update.effective_user.id
         
@@ -297,9 +295,8 @@ class WhaleTrackerBot:
     
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help and /wally commands"""
-        # CHECK CHANNEL FIRST
-        if not self._is_allowed_channel(update):
-            return  # Silently ignore
+        if not self._is_whale_tracking_thread(update):
+            return
         
         message = (
             "🐋 <b>Wally Whale Tracker</b>\n\n"
@@ -359,7 +356,8 @@ def main():
     
     logger.info("=" * 50)
     logger.info("🐋 WALLY WHALE TRACKER")
-    logger.info(f"🔒 LOCKED TO CHANNEL: {ALLOWED_CHANNEL_ID}")
+    logger.info(f"📍 Group ID: {TELEGRAM_CHAT_ID}")
+    logger.info(f"🔒 Thread ID: {TELEGRAM_THREAD_ID} (Whale-Tracking)")
     logger.info("=" * 50)
     
     bot = WhaleTrackerBot()
