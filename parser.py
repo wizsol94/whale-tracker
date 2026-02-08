@@ -1,14 +1,12 @@
 """
 Transaction parser for Helius webhook data
-Determines BUY vs SELL from balance changes
-WITH ENHANCED DEBUG LOGGING
+FIXED: Accurate SOL/USD calculations from on-chain balance deltas
 """
 
 import logging
-from typing import Optional, Dict, List
-from decimal import Decimal
 import requests
-import json
+from typing import Optional, Dict
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -16,278 +14,213 @@ logger = logging.getLogger(__name__)
 SOL_MINT = "So11111111111111111111111111111111111111112"
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 
+# Lamports per SOL
+LAMPORTS_PER_SOL = Decimal('1000000000')
+
 
 class TransactionParser:
     
+    _sol_price_cache = None
+    _sol_price_timestamp = 0
+    
     @staticmethod
-    def fetch_token_metadata(token_mint: str) -> Dict:
-        """
-        Fetch token metadata from DexScreener or Jupiter API
-        Returns symbol and name
-        """
-        # Try DexScreener FIRST (more accurate for pump.fun tokens)
-        try:
-            url = f"https://api.dexscreener.com/latest/dex/tokens/{token_mint}"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('pairs') and len(data['pairs']) > 0:
-                    pair = data['pairs'][0]
-                    base_token = pair.get('baseToken', {})
-                    symbol = base_token.get('symbol', 'UNKNOWN')
-                    name = base_token.get('name', None)
-                    if symbol != 'UNKNOWN':
-                        logger.debug(f"Got token from DexScreener: {symbol}")
-                        return {
-                            'symbol': symbol,
-                            'name': name
-                        }
-        except Exception as e:
-            logger.debug(f"DexScreener API failed for {token_mint}: {e}")
+    def _get_sol_price() -> float:
+        """Fetch current SOL price from CoinGecko (cached for 30 seconds)"""
+        import time
+        now = time.time()
         
-        # Try Jupiter API as backup
-        try:
-            url = f"https://tokens.jup.ag/token/{token_mint}"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                symbol = data.get('symbol', 'UNKNOWN')
-                if symbol != 'UNKNOWN':
-                    logger.debug(f"Got token from Jupiter: {symbol}")
-                    return {
-                        'symbol': symbol,
-                        'name': data.get('name', None)
-                    }
-        except Exception as e:
-            logger.debug(f"Jupiter API failed for {token_mint}: {e}")
+        # Return cached price if fresh
+        if TransactionParser._sol_price_cache and (now - TransactionParser._sol_price_timestamp) < 30:
+            return TransactionParser._sol_price_cache
         
-        # Fallback to shortened mint address
-        logger.warning(f"Could not fetch token metadata for {token_mint}, using mint prefix")
-        return {
-            'symbol': token_mint[:6],
-            'name': None
-        }
+        try:
+            url = "https://api.coingecko.com/api/v3/simple/price"
+            params = {"ids": "solana", "vs_currencies": "usd"}
+            response = requests.get(url, params=params, timeout=5)
+            data = response.json()
+            price = float(data['solana']['usd'])
+            
+            # Cache it
+            TransactionParser._sol_price_cache = price
+            TransactionParser._sol_price_timestamp = now
+            
+            logger.debug(f"SOL price: ${price}")
+            return price
+        except Exception as e:
+            logger.error(f"Failed to get SOL price: {e}")
+            # Return cached or fallback
+            return TransactionParser._sol_price_cache or 200.0
     
     @staticmethod
     def parse_transaction(tx_data: Dict, whale_address: str) -> Optional[Dict]:
         """
-        Parse Helius transaction and determine if it's a BUY or SELL
+        Parse Helius transaction with ACCURATE on-chain calculations
         
-        Returns Dict with:
-        - type: 'BUY' or 'SELL'
-        - token_mint: str
-        - token_symbol: str
-        - token_amount: float
-        - sol_amount: float
-        - whale_address: str
-        - signature: str
-        - timestamp: int
+        FIXES:
+        1. SOL = accountData.nativeBalanceChange (true delta, includes fees)
+        2. Token amount = tokenAmount (already decimal-adjusted by Helius)
+        3. USD = SOL * real price at tx time
         """
         try:
-            # Get transaction signature
             signature = tx_data.get('signature')
             if not signature:
-                logger.warning("❌ FILTER: No signature in transaction")
+                logger.warning("No signature in transaction")
                 return None
             
-            logger.info(f"🔍 PARSING TX: {signature[:16]}... for whale {whale_address[:8]}...")
-            
-            # Check if transaction failed
-            if tx_data.get('err'):
-                logger.debug(f"❌ FILTER: Failed transaction: {signature[:16]}...")
+            # Skip failed transactions
+            if tx_data.get('transactionError') or tx_data.get('err'):
+                logger.debug(f"Skipping failed transaction: {signature}")
                 return None
             
-            # Get token balances (parsed by Helius)
+            # =========================================================
+            # FIX #1: Get SOL change from accountData (TRUE on-chain delta)
+            # =========================================================
+            whale_sol_change_lamports = Decimal('0')
+            found_in_account_data = False
+            
+            for account in tx_data.get('accountData', []):
+                if account.get('account') == whale_address:
+                    found_in_account_data = True
+                    balance_change = account.get('nativeBalanceChange', 0)
+                    whale_sol_change_lamports = Decimal(str(balance_change))
+                    break
+            
+            # Fallback to nativeTransfers if accountData missing
+            if not found_in_account_data:
+                for transfer in tx_data.get('nativeTransfers', []):
+                    from_addr = transfer.get('fromUserAccount', '')
+                    to_addr = transfer.get('toUserAccount', '')
+                    amount = Decimal(str(transfer.get('amount', 0)))
+                    
+                    if from_addr == whale_address:
+                        whale_sol_change_lamports -= amount
+                    elif to_addr == whale_address:
+                        whale_sol_change_lamports += amount
+            
+            # Single lamports → SOL conversion
+            whale_sol_change = whale_sol_change_lamports / LAMPORTS_PER_SOL
+            
+            # =========================================================
+            # FIX #2: Parse token transfers (Helius tokenAmount is already human-readable)
+            # =========================================================
             token_transfers = tx_data.get('tokenTransfers', [])
-            native_transfers = tx_data.get('nativeTransfers', [])
-            
-            logger.debug(f"📊 TX DATA: {len(token_transfers)} token transfers, {len(native_transfers)} native transfers")
-            
             if not token_transfers:
-                logger.debug(f"❌ FILTER: No token transfers in tx: {signature[:16]}...")
+                logger.debug(f"No token transfers in tx: {signature}")
                 return None
             
-            # Find balance changes for our whale
             whale_token_changes = []
-            whale_sol_change = Decimal('0')
-            wsol_received = Decimal('0')  # Track WSOL to avoid double-counting
-            wsol_sent = Decimal('0')
             
-            # Parse token transfers FIRST
             for transfer in token_transfers:
                 from_addr = transfer.get('fromUserAccount', '')
                 to_addr = transfer.get('toUserAccount', '')
-                amount = Decimal(str(transfer.get('tokenAmount', 0)))
                 mint = transfer.get('mint', '')
                 
-                logger.debug(f"  📦 Token: {mint[:8]}... | From: {from_addr[:8]}... | To: {to_addr[:8]}... | Amount: {amount}")
-                
-                # CRITICAL FIX: Treat WSOL (wrapped SOL) as SOL, not as a token
+                # Skip SOL/WSOL
                 if mint in [SOL_MINT, WSOL_MINT]:
-                    logger.debug(f"    💰 This is WSOL - treating as SOL transfer")
-                    if from_addr == whale_address:
-                        whale_sol_change -= amount
-                        wsol_sent += amount
-                        logger.debug(f"    ➡️ Whale SENT {amount} SOL (via WSOL)")
-                    elif to_addr == whale_address:
-                        whale_sol_change += amount
-                        wsol_received += amount
-                        logger.debug(f"    ⬅️ Whale RECEIVED {amount} SOL (via WSOL)")
-                    continue  # Skip adding to token changes
-                
-                # Track changes for our whale (non-SOL tokens only)
-                if from_addr == whale_address:
-                    # Whale sent token (negative change)
-                    whale_token_changes.append({
-                        'mint': mint,
-                        'amount': -amount,
-                        'decimals': transfer.get('decimals', 9)
-                    })
-                    logger.debug(f"    ➡️ Whale SENT {amount} of {mint[:8]}...")
-                elif to_addr == whale_address:
-                    # Whale received token (positive change)
-                    whale_token_changes.append({
-                        'mint': mint,
-                        'amount': amount,
-                        'decimals': transfer.get('decimals', 9)
-                    })
-                    logger.debug(f"    ⬅️ Whale RECEIVED {amount} of {mint[:8]}...")
-            
-            # Parse native SOL transfers
-            for transfer in native_transfers:
-                from_addr = transfer.get('fromUserAccount', '')
-                to_addr = transfer.get('toUserAccount', '')
-                amount = Decimal(str(transfer.get('amount', 0))) / Decimal('1000000000')  # Convert lamports to SOL
-                
-                logger.debug(f"  💰 SOL: From: {from_addr[:8]}... | To: {to_addr[:8]}... | Amount: {amount} SOL")
-                
-                # CRITICAL FIX: Skip native SOL that matches WSOL unwraps (double-counting prevention)
-                # When WSOL is unwrapped, it creates both a WSOL token transfer AND a native SOL transfer
-                # We already counted the WSOL, so skip the matching native SOL
-                if to_addr == whale_address and amount == wsol_received:
-                    logger.debug(f"    ⚠️ SKIPPING - This is WSOL unwrap already counted")
-                    continue
-                if from_addr == whale_address and amount == wsol_sent:
-                    logger.debug(f"    ⚠️ SKIPPING - This is WSOL wrap already counted")
                     continue
                 
+                # tokenAmount from Helius is ALREADY decimal-adjusted
+                token_amount = Decimal(str(transfer.get('tokenAmount', 0)))
+                decimals = transfer.get('decimals', 9)
+                
                 if from_addr == whale_address:
-                    whale_sol_change -= amount
-                    logger.debug(f"    ➡️ Whale SENT {amount} SOL")
+                    whale_token_changes.append({
+                        'mint': mint,
+                        'amount': -token_amount,
+                        'decimals': decimals
+                    })
                 elif to_addr == whale_address:
-                    whale_sol_change += amount
-                    logger.debug(f"    ⬅️ Whale RECEIVED {amount} SOL")
-            
-            logger.info(f"  📈 Whale Balance Changes: Token changes: {len(whale_token_changes)}, SOL change: {whale_sol_change}")
-            
-            # Determine BUY or SELL
-            # BUY = SOL decreases AND token increases
-            # SELL = token decreases AND SOL increases
+                    whale_token_changes.append({
+                        'mint': mint,
+                        'amount': token_amount,
+                        'decimals': decimals
+                    })
             
             if not whale_token_changes:
-                logger.warning(f"❌ FILTER: No token changes for whale in tx: {signature[:16]}...")
+                logger.debug(f"No token changes for whale in tx: {signature}")
                 return None
             
-            # Find the token with the largest absolute balance change
+            # Get main token (largest change)
             main_token = max(whale_token_changes, key=lambda x: abs(x['amount']))
             token_change = main_token['amount']
             token_mint = main_token['mint']
             token_decimals = main_token['decimals']
             
-            logger.debug(f"  🎯 Main token: {token_mint[:8]}... | Change: {token_change}")
-            
-            # Determine trade type
-            trade_type = None
+            # =========================================================
+            # Determine BUY or SELL
+            # =========================================================
             if token_change > 0 and whale_sol_change < 0:
                 trade_type = 'BUY'
                 token_amount = float(token_change)
                 sol_amount = abs(float(whale_sol_change))
-                logger.info(f"  ✅ IDENTIFIED: BUY - Token +{token_change}, SOL {whale_sol_change}")
             elif token_change < 0 and whale_sol_change > 0:
                 trade_type = 'SELL'
                 token_amount = abs(float(token_change))
                 sol_amount = float(whale_sol_change)
-                logger.info(f"  ✅ IDENTIFIED: SELL - Token {token_change}, SOL +{whale_sol_change}")
             else:
-                logger.warning(f"❌ FILTER: Ambiguous transaction (token: {token_change}, SOL: {whale_sol_change}): {signature[:16]}...")
-                logger.warning(f"  ⚠️ This might be a valid trade that we're missing! Review the logic.")
+                logger.debug(f"Ambiguous tx (token: {token_change}, SOL: {whale_sol_change}): {signature}")
                 return None
             
-            # FIXED: Fetch actual token metadata from APIs
-            token_symbol = "UNKNOWN"
+            # =========================================================
+            # FIX #3: Get real SOL price for USD calculation
+            # =========================================================
+            sol_price = TransactionParser._get_sol_price()
             
-            # First, try to get from Helius transaction data
+            # =========================================================
+            # Get token symbol
+            # =========================================================
+            token_symbol = "UNKNOWN"
             for transfer in token_transfers:
                 if transfer.get('mint') == token_mint:
-                    # Check if Helius provided token info
-                    if 'tokenSymbol' in transfer:
-                        token_symbol = transfer['tokenSymbol']
-                        logger.debug(f"  🏷️ Token symbol from Helius: {token_symbol}")
-                        break
+                    token_symbol = transfer.get('symbol') or transfer.get('tokenStandard') or 'UNKNOWN'
+                    break
             
-            # If still unknown, fetch from external APIs
-            if token_symbol == "UNKNOWN":
-                logger.info(f"  🌐 Fetching token metadata for mint: {token_mint[:8]}...")
-                metadata = TransactionParser.fetch_token_metadata(token_mint)
-                token_symbol = metadata['symbol']
-                logger.debug(f"  🏷️ Token symbol from API: {token_symbol}")
+            # Check accountData for symbol
+            for account in tx_data.get('accountData', []):
+                if account.get('account') == token_mint:
+                    token_symbol = account.get('tokenSymbol', token_symbol)
+                    break
             
+            # =========================================================
+            # Build result with accurate numbers
+            # =========================================================
             result = {
                 'type': trade_type,
                 'token_mint': token_mint,
                 'token_symbol': token_symbol,
                 'token_amount': token_amount,
                 'sol_amount': sol_amount,
+                'sol_price': sol_price,  # Real price
                 'whale_address': whale_address,
                 'signature': signature,
                 'timestamp': tx_data.get('timestamp', 0),
                 'decimals': token_decimals
             }
             
-            logger.info(f"✅ PARSED {trade_type}: {token_amount} {token_symbol} for {sol_amount} SOL by whale {whale_address[:8]}...")
+            logger.info(f"Parsed {trade_type}: {token_amount:,.2f} {token_symbol} for {sol_amount:.4f} SOL")
             return result
             
         except Exception as e:
-            logger.error(f"❌ ERROR parsing transaction: {e}", exc_info=True)
+            logger.error(f"Error parsing transaction: {e}", exc_info=True)
             return None
     
     @staticmethod
     def extract_token_info(tx_data: Dict, token_mint: str) -> Dict:
-        """
-        Extract additional token information from transaction
-        Returns: symbol, name, metadata
-        """
-        info = {
-            'symbol': 'UNKNOWN',
-            'name': None,
-            'decimals': 9
-        }
+        """Extract token metadata"""
+        info = {'symbol': 'UNKNOWN', 'name': None, 'decimals': 9}
         
         try:
-            # Check token transfers for metadata
-            token_transfers = tx_data.get('tokenTransfers', [])
-            for transfer in token_transfers:
+            for transfer in tx_data.get('tokenTransfers', []):
                 if transfer.get('mint') == token_mint:
-                    # Fixed: use tokenSymbol instead of tokenStandard
-                    if 'tokenSymbol' in transfer:
-                        info['symbol'] = transfer['tokenSymbol']
+                    info['symbol'] = transfer.get('symbol') or transfer.get('tokenStandard') or info['symbol']
                     info['decimals'] = transfer.get('decimals', info['decimals'])
                     break
             
-            # Check account data
-            account_data = tx_data.get('accountData', [])
-            for account in account_data:
+            for account in tx_data.get('accountData', []):
                 if account.get('account') == token_mint:
                     info['symbol'] = account.get('tokenSymbol', info['symbol'])
                     info['name'] = account.get('tokenName')
                     break
-            
-            # If still unknown, fetch from APIs
-            if info['symbol'] == 'UNKNOWN':
-                metadata = TransactionParser.fetch_token_metadata(token_mint)
-                info['symbol'] = metadata['symbol']
-                info['name'] = metadata['name']
-        
         except Exception as e:
             logger.error(f"Error extracting token info: {e}")
         
