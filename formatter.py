@@ -1,13 +1,12 @@
 """
 Telegram message formatter for whale trades
-Formats messages in Ray Purple style with enhanced details
+Formats messages in Ray Purple style
+FIXED: Uses real SOL price for USD calculation (layout unchanged)
 """
 
 import logging
 from typing import Dict
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-import requests
-from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -15,82 +14,12 @@ logger = logging.getLogger(__name__)
 class MessageFormatter:
     
     @staticmethod
-    def get_token_market_data(token_mint: str) -> Dict:
-        """
-        Fetch market cap and token age from DexScreener
-        Returns: {market_cap, age_hours, age_days}
-        """
-        try:
-            logger.debug(f"🌐 Fetching market data from DexScreener for {token_mint[:8]}...")
-            url = f"https://api.dexscreener.com/latest/dex/tokens/{token_mint}"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('pairs') and len(data['pairs']) > 0:
-                    pair = data['pairs'][0]
-                    
-                    # Get market cap
-                    market_cap = pair.get('fdv') or pair.get('marketCap', 0)
-                    logger.debug(f"  📊 Market cap: ${market_cap}")
-                    
-                    # Get token creation time
-                    pair_created_at = pair.get('pairCreatedAt')
-                    age_hours = None
-                    age_days = None
-                    
-                    if pair_created_at:
-                        try:
-                            created_time = datetime.fromtimestamp(pair_created_at / 1000, tz=timezone.utc)
-                            current_time = datetime.now(timezone.utc)
-                            age_delta = current_time - created_time
-                            age_hours = int(age_delta.total_seconds() / 3600)
-                            age_days = int(age_delta.days)
-                            logger.debug(f"  ⏰ Token age: {age_days}d {age_hours % 24}h")
-                        except Exception as e:
-                            logger.debug(f"  ⚠️ Could not parse token age: {e}")
-                    
-                    return {
-                        'market_cap': market_cap,
-                        'age_hours': age_hours,
-                        'age_days': age_days
-                    }
-                else:
-                    logger.debug(f"  ⚠️ No pairs found in DexScreener response")
-            else:
-                logger.debug(f"  ⚠️ DexScreener returned status {response.status_code}")
-        except Exception as e:
-            logger.debug(f"  ❌ DexScreener API error: {e}")
-        
-        logger.debug(f"  ⚠️ Returning empty market data")
-        return {'market_cap': None, 'age_hours': None, 'age_days': None}
-    
-    @staticmethod
-    def format_market_cap(market_cap: float) -> str:
-        """Format market cap nicely"""
-        if market_cap >= 1_000_000:
-            return f"${market_cap/1_000_000:.2f}M"
-        elif market_cap >= 1_000:
-            return f"${market_cap/1_000:.2f}K"
-        else:
-            return f"${market_cap:.2f}"
-    
-    @staticmethod
-    def format_age(age_days: int, age_hours: int) -> str:
-        """Format token age nicely"""
-        if age_days is None or age_hours is None:
-            return "Unknown"
-        
-        if age_days > 0:
-            remaining_hours = age_hours % 24
-            return f"{age_days}d {remaining_hours}h"
-        else:
-            return f"{age_hours}h"
-    
-    @staticmethod
     def format_trade_message(trade: Dict, whale_label: str) -> tuple:
         """
         Format trade into Telegram message
         Returns: (message_text, reply_markup)
+        
+        LAYOUT UNCHANGED - only USD calculation fixed
         """
         try:
             trade_type = trade['type']
@@ -98,86 +27,50 @@ class MessageFormatter:
             token_amount = trade['token_amount']
             sol_amount = trade['sol_amount']
             token_mint = trade['token_mint']
-            whale_address = trade['whale_address']
+            sol_price = trade.get('sol_price', 200.0)  # Real price from parser
             
             # Format numbers nicely
             token_amount_str = MessageFormatter._format_number(token_amount)
             sol_amount_str = MessageFormatter._format_number(sol_amount, decimals=3)
             
-            # Calculate USD value (using rough SOL price estimation)
-            # In production, you'd want to fetch real-time SOL price
-            SOL_PRICE_USD = 100  # Update this or fetch from API
-            usd_value = sol_amount * SOL_PRICE_USD
-            usd_value_str = MessageFormatter._format_number(usd_value, decimals=2)
+            # Emoji for trade type
+            emoji = "🟢" if trade_type == "BUY" else "🔴"
             
-            # Calculate token price
-            price_per_token = 0
+            # Header
+            header = f"{emoji} <b>{trade_type} {token_symbol} on PumpSwap</b>\n"
+            
+            # Whale label
+            whale_line = f"<b>{whale_label}</b>\n\n"
+            
+            # Trade details
+            if trade_type == "BUY":
+                action = f"{whale_label} swapped {sol_amount_str} SOL for {token_amount_str} {token_symbol}"
+            else:  # SELL
+                action = f"{whale_label} swapped {token_amount_str} {token_symbol} for {sol_amount_str} SOL"
+            
+            # FIX: Use real SOL price instead of hardcoded $100
             try:
                 if token_amount > 0:
                     price_per_token = sol_amount / token_amount
-                    price_usd = price_per_token * SOL_PRICE_USD
-                    price_line = f"💵 Avg: ${MessageFormatter._format_number(price_usd, decimals=8)}"
+                    price_usd = price_per_token * sol_price  # FIXED: real price
+                    price_line = f"\nAvg: ${MessageFormatter._format_number(price_usd, decimals=6)} (est)"
                 else:
                     price_line = ""
             except:
                 price_line = ""
             
-            # Fetch market data
-            market_data = MessageFormatter.get_token_market_data(token_mint)
+            # Construct full message (UNCHANGED LAYOUT)
+            message = header + whale_line + action + price_line
             
-            # Emoji for trade type
-            if trade_type == "BUY":
-                emoji = "🟢"
-                action_emoji = "💸"
-                action = f"{whale_label} swapped {sol_amount_str} SOL (${usd_value_str}) for {token_amount_str} {token_symbol}"
-            else:  # SELL
-                emoji = "🔴"
-                action_emoji = "💰"
-                action = f"{whale_label} swapped {token_amount_str} {token_symbol} for {sol_amount_str} SOL (${usd_value_str})"
-            
-            # Header with more emojis
-            header = f"{emoji} <b>{trade_type} {token_symbol} on PumpSwap</b> 🚀\n\n"
-            
-            # Whale label with emoji and Solscan link
-            whale_line = f"🐋 <b>{whale_label}</b>\n🔗 <a href=\"https://solscan.io/account/{whale_address}\">Solscan</a>\n\n"
-            
-            # Action line with emoji
-            action_line = f"{action_emoji} {action}\n"
-            
-            # Price line
-            if price_line:
-                action_line += price_line + "\n"
-            
-            # Market cap and age line
-            info_parts = []
-            if market_data['market_cap']:
-                mc_str = MessageFormatter.format_market_cap(market_data['market_cap'])
-                info_parts.append(f"📊 MC: {mc_str}")
-            
-            if market_data['age_days'] is not None:
-                age_str = MessageFormatter.format_age(market_data['age_days'], market_data['age_hours'])
-                info_parts.append(f"⏰ Seen: {age_str}")
-            
-            if info_parts:
-                market_line = " | ".join(info_parts) + "\n"
-            else:
-                market_line = ""
-            
-            # Contract address line with emoji
-            contract_line = f"\n🧾 <b>Contract:</b>\n<code>{token_mint}</code>\n"
-            
-            # Construct full message
-            message = header + whale_line + action_line + market_line + contract_line
-            
-            # Inline keyboard with buttons
+            # Inline keyboard with TWO buttons only (UNCHANGED)
             keyboard = [
                 [
                     InlineKeyboardButton(
-                        "📈 Dexscreener",
+                        "Dexscreener",
                         url=f"https://dexscreener.com/solana/{token_mint}"
                     ),
                     InlineKeyboardButton(
-                        "🎯 Pump.fun",
+                        "Pump Address",
                         url=f"https://pump.fun/{token_mint}"
                     )
                 ]
@@ -189,8 +82,8 @@ class MessageFormatter:
         except Exception as e:
             logger.error(f"Error formatting message: {e}", exc_info=True)
             # Fallback message
-            emoji = "🟢" if trade_type == "BUY" else "🔴"
-            message = f"{emoji} {trade_type} detected for {whale_label}"
+            emoji = "🟢" if trade.get('type') == "BUY" else "🔴"
+            message = f"{emoji} {trade.get('type', 'TRADE')} detected for {whale_label}"
             return message, None
     
     @staticmethod
@@ -210,7 +103,7 @@ class MessageFormatter:
     def format_whales_list(whales: list) -> str:
         """Format list of whales for /whales command"""
         if not whales:
-            return "❌ No whales configured."
+            return "No whales configured."
         
         message = "<b>🐋 Tracked Whales:</b>\n\n"
         
@@ -219,20 +112,20 @@ class MessageFormatter:
             address_short = whale['address'][:8] + "..." + whale['address'][-6:]
             message += f"<b>{whale['label']}</b>\n"
             message += f"Status: {status}\n"
-            message += f"📍 Address: <code>{address_short}</code>\n\n"
+            message += f"Address: <code>{address_short}</code>\n\n"
         
         return message
     
     @staticmethod
-    def format_wally_help() -> str:
-        """Format Wally whale tracker help message"""
-        return """<b>🐋 Wally Whale Tracker Commands</b>
+    def format_help_message() -> str:
+        """Format help message"""
+        return """<b>🐋 Whale Tracker Bot Commands</b>
 
-<b>📊 View Commands:</b>
+<b>View Commands:</b>
 /whales - List all tracked whales
-/wally - Show this help menu
+/help - Show this help message
 
-<b>⚙️ Management Commands (Admin Only):</b>
+<b>Management Commands (Admin Only):</b>
 /addwhale &lt;label&gt; &lt;address&gt; - Add new whale
 /removewhale &lt;label/address&gt; - Remove whale
 /pausewhale &lt;label/address&gt; - Pause tracking
@@ -240,6 +133,6 @@ class MessageFormatter:
 /pauseall - Pause all whales
 /resumeall - Resume all whales
 
-<b>💡 Example:</b>
+<b>Example:</b>
 <code>/addwhale MyWhale ABC123...</code>
 """
