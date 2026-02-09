@@ -68,20 +68,10 @@ class MessageFormatter:
             age_display = token_age if token_age else "N/A"
             mc_line = f"📊 MC: {mc_display} | ⏱ Seen: {age_display}"
             
-            # CONTRACT BLOCK (token name above contract)
-            contract_block = f"{token_symbol}\n📝 Contract:\n<code>{token_mint}</code>"
+            # CONTRACT BLOCK (no standalone token label)
+            contract_block = f"📄 Contract:\n<code>{token_mint}</code>"
             
             # BUILD MESSAGE WITH EXACT SPACING
-            # 1) Action line
-            # 2) blank
-            # 3) Wallet block (name + solscan, NO blank between)
-            # 4) blank
-            # 5) Swap line
-            # 6) Avg line (NO blank)
-            # 7) MC line (NO blank)
-            # 8) blank
-            # 9) Contract block (token name + contract header + address)
-            
             message = f"{action_line}\n\n{wallet_block}\n\n{swap_line}\n{avg_line}\n{mc_line}\n\n{contract_block}"
             
             # BUTTONS (exactly two)
