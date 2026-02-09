@@ -2,6 +2,7 @@
 Wally v1.0.1 — Canonical Restore (Text-Spec Locked)
 Telegram message formatter for whale trades
 DO NOT MODIFY FORMAT - LOCKED PRODUCTION VERSION
+SPACING UPDATE ONLY - Feb 9 2026
 """
 
 import logging
@@ -47,42 +48,41 @@ class MessageFormatter:
             avg_str = MessageFormatter._format_avg_price(avg_price)
             mc_str = MessageFormatter._format_market_cap(market_cap)
             
-            # Build message lines
-            lines = []
-            
             # ACTION LINE
             emoji = "🟢" if trade_type == "BUY" else "🔴"
-            lines.append(f"{emoji} <b>{trade_type} {token_symbol} on PumpSwap</b> 🚀")
-            lines.append("")
+            action_line = f"{emoji} <b>{trade_type} {token_symbol} on PumpSwap</b> 🚀"
             
-            # WALLET BLOCK
+            # WALLET BLOCK (no blank line between name and solscan)
             solscan_wallet_url = f"https://solscan.io/account/{whale_address}"
-            lines.append(f"🐳 <b>{whale_label}</b> <a href=\"{solscan_wallet_url}\">🔗 Solscan</a>")
-            lines.append("")
+            wallet_block = f"🐳 <b>{whale_label}</b>\n🔗 <a href=\"{solscan_wallet_url}\">Solscan</a>"
             
-            # SWAP DETAILS
+            # SWAP DETAILS (no blank lines between these three)
             if trade_type == "BUY":
-                lines.append(f"{whale_label} swapped {sol_str} SOL (${usd_str}) for {token_str} {token_symbol}")
+                swap_line = f"{whale_label} swapped {sol_str} SOL (${usd_str}) for {token_str} {token_symbol}"
             else:
-                lines.append(f"{whale_label} swapped {token_str} {token_symbol} for {sol_str} SOL (${usd_str})")
-            lines.append("")
+                swap_line = f"{whale_label} swapped {token_str} {token_symbol} for {sol_str} SOL (${usd_str})"
             
-            # PRICE LINE
-            lines.append(f"💵 Avg: ${avg_str}")
-            lines.append("")
+            avg_line = f"💰 Avg: ${avg_str}"
             
-            # MARKET CONTEXT LINE
-            if market_cap > 0 or token_age:
-                mc_display = f"${mc_str}" if market_cap > 0 else "N/A"
-                age_display = token_age if token_age else "N/A"
-                lines.append(f"📊 MC: {mc_display} | ⏰ Seen: {age_display}")
-                lines.append("")
+            mc_display = f"${mc_str}" if market_cap > 0 else "N/A"
+            age_display = token_age if token_age else "N/A"
+            mc_line = f"📊 MC: {mc_display} | ⏱ Seen: {age_display}"
             
-            # CONTRACT BLOCK
-            lines.append(f"📄 Contract:")
-            lines.append(f"<code>{token_mint}</code>")
+            # CONTRACT BLOCK (token name above contract)
+            contract_block = f"{token_symbol}\n📝 Contract:\n<code>{token_mint}</code>"
             
-            message = "\n".join(lines)
+            # BUILD MESSAGE WITH EXACT SPACING
+            # 1) Action line
+            # 2) blank
+            # 3) Wallet block (name + solscan, NO blank between)
+            # 4) blank
+            # 5) Swap line
+            # 6) Avg line (NO blank)
+            # 7) MC line (NO blank)
+            # 8) blank
+            # 9) Contract block (token name + contract header + address)
+            
+            message = f"{action_line}\n\n{wallet_block}\n\n{swap_line}\n{avg_line}\n{mc_line}\n\n{contract_block}"
             
             # BUTTONS (exactly two)
             keyboard = [
