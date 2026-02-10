@@ -1,7 +1,7 @@
 """
-Wally v1.0.1 — Parser + Token Resolution Fix
-Accurate SOL/USD calculations + Real token names
-DO NOT MODIFY - LOCKED PRODUCTION VERSION
+Wally v1.0.2 — Parser BUG FIX
+Accurate swap detection: TRUE input asset, ignore dust, handle USDC
+DO NOT MODIFY FORMAT - LOCKED PRODUCTION VERSION
 """
 
 import logging
@@ -12,17 +12,21 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Known Solana tokens
+# Known tokens
 SOL_MINT = "So11111111111111111111111111111111111111112"
 WSOL_MINT = "So11111111111111111111111111111111111111112"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+
 LAMPORTS_PER_SOL = Decimal('1000000000')
+DUST_THRESHOLD_SOL = Decimal('0.01')  # Ignore SOL movements below this
 
 
 class TransactionParser:
     
     _sol_price_cache = None
     _sol_price_timestamp = 0
-    _token_cache = {}  # Cache token metadata
+    _token_cache = {}
     
     @staticmethod
     def _get_sol_price() -> float:
@@ -49,15 +53,9 @@ class TransactionParser:
     
     @staticmethod
     def _get_token_metadata(mint: str) -> Dict:
-        """
-        Fetch token metadata from DexScreener API
-        Returns: {symbol, name, market_cap, age}
-        FIXES "Fungible" bug by getting real token name
-        """
-        # Check cache first
+        """Fetch token metadata from DexScreener API"""
         if mint in TransactionParser._token_cache:
             cached = TransactionParser._token_cache[mint]
-            # Cache for 5 minutes
             if cached.get('_cached_at', 0) > datetime.now().timestamp() - 300:
                 return cached
         
@@ -70,19 +68,15 @@ class TransactionParser:
         }
         
         try:
-            # DexScreener API - most reliable for Solana tokens
             url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
             response = requests.get(url, timeout=5)
             data = response.json()
             
             if data.get('pairs') and len(data['pairs']) > 0:
-                pair = data['pairs'][0]  # Get first/main pair
-                
-                # Get token info from baseToken or quoteToken
+                pair = data['pairs'][0]
                 base = pair.get('baseToken', {})
                 quote = pair.get('quoteToken', {})
                 
-                # Determine which is our token
                 if base.get('address', '').lower() == mint.lower():
                     token_info = base
                 else:
@@ -90,42 +84,23 @@ class TransactionParser:
                 
                 result['symbol'] = token_info.get('symbol', 'UNKNOWN')
                 result['name'] = token_info.get('name', '')
-                
-                # Market cap
                 result['market_cap'] = float(pair.get('marketCap', 0) or 0)
                 
-                # Calculate age from pairCreatedAt
                 created_at = pair.get('pairCreatedAt')
                 if created_at:
                     try:
-                        created_ts = int(created_at) / 1000  # Convert ms to seconds
+                        created_ts = int(created_at) / 1000
                         age_seconds = datetime.now().timestamp() - created_ts
                         result['age'] = TransactionParser._format_age(age_seconds)
                     except:
                         pass
-                
-                logger.info(f"Token resolved: {mint[:8]}... = {result['symbol']}")
-            
+                        
         except Exception as e:
-            logger.error(f"Failed to get token metadata for {mint[:8]}...: {e}")
+            logger.error(f"Failed to get token metadata: {e}")
         
-        # Try Jupiter API as fallback
         if result['symbol'] == 'UNKNOWN':
-            try:
-                url = f"https://token.jup.ag/strict"
-                response = requests.get(url, timeout=5)
-                tokens = response.json()
-                
-                for token in tokens:
-                    if token.get('address') == mint:
-                        result['symbol'] = token.get('symbol', 'UNKNOWN')
-                        result['name'] = token.get('name', '')
-                        logger.info(f"Token resolved via Jupiter: {mint[:8]}... = {result['symbol']}")
-                        break
-            except Exception as e:
-                logger.debug(f"Jupiter fallback failed: {e}")
+            result['symbol'] = f"{mint[:4]}...{mint[-4:]}"
         
-        # Cache result
         TransactionParser._token_cache[mint] = result
         return result
     
@@ -146,133 +121,199 @@ class TransactionParser:
     @staticmethod
     def parse_transaction(tx_data: Dict, whale_address: str) -> Optional[Dict]:
         """
-        Parse Helius transaction with accurate calculations
-        + Real token name resolution (fixes "Fungible" bug)
+        Parse Helius transaction with ACCURATE swap detection
+        
+        FIX v1.0.2:
+        - Detect TRUE input asset (USDC vs SOL)
+        - Ignore dust SOL movements (< 0.01 SOL)
+        - Handle routed swaps (Jupiter, PumpSwap)
         """
         try:
             signature = tx_data.get('signature')
             if not signature:
-                logger.warning("No signature in transaction")
                 return None
             
             if tx_data.get('transactionError') or tx_data.get('err'):
-                logger.debug(f"Skipping failed transaction: {signature}")
                 return None
             
-            # Get SOL change from accountData (accurate method)
-            whale_sol_change_lamports = Decimal('0')
-            found_in_account_data = False
-            
-            for account in tx_data.get('accountData', []):
-                if account.get('account') == whale_address:
-                    found_in_account_data = True
-                    balance_change = account.get('nativeBalanceChange', 0)
-                    whale_sol_change_lamports = Decimal(str(balance_change))
-                    break
-            
-            # Fallback to nativeTransfers
-            if not found_in_account_data:
-                for transfer in tx_data.get('nativeTransfers', []):
-                    from_addr = transfer.get('fromUserAccount', '')
-                    to_addr = transfer.get('toUserAccount', '')
-                    amount = Decimal(str(transfer.get('amount', 0)))
-                    
-                    if from_addr == whale_address:
-                        whale_sol_change_lamports -= amount
-                    elif to_addr == whale_address:
-                        whale_sol_change_lamports += amount
-            
-            whale_sol_change = whale_sol_change_lamports / LAMPORTS_PER_SOL
-            
-            # Parse token transfers
             token_transfers = tx_data.get('tokenTransfers', [])
             if not token_transfers:
-                logger.debug(f"No token transfers in tx: {signature}")
                 return None
             
-            whale_token_changes = []
+            # =============================================================
+            # STEP 1: Collect ALL token movements for this whale
+            # =============================================================
+            whale_movements = {
+                'sol': Decimal('0'),
+                'usdc': Decimal('0'),
+                'usdt': Decimal('0'),
+                'tokens': []  # Other tokens
+            }
             
             for transfer in token_transfers:
                 from_addr = transfer.get('fromUserAccount', '')
                 to_addr = transfer.get('toUserAccount', '')
                 mint = transfer.get('mint', '')
-                
-                if mint in [SOL_MINT, WSOL_MINT]:
-                    continue
-                
-                token_amount = Decimal(str(transfer.get('tokenAmount', 0)))
-                decimals = transfer.get('decimals', 9)
+                amount = Decimal(str(transfer.get('tokenAmount', 0)))
                 
                 if from_addr == whale_address:
-                    whale_token_changes.append({
-                        'mint': mint,
-                        'amount': -token_amount,
-                        'decimals': decimals
-                    })
+                    delta = -amount
                 elif to_addr == whale_address:
-                    whale_token_changes.append({
+                    delta = amount
+                else:
+                    continue
+                
+                # Categorize by token type
+                if mint in [SOL_MINT, WSOL_MINT]:
+                    whale_movements['sol'] += delta
+                elif mint == USDC_MINT:
+                    whale_movements['usdc'] += delta
+                elif mint == USDT_MINT:
+                    whale_movements['usdt'] += delta
+                else:
+                    whale_movements['tokens'].append({
                         'mint': mint,
-                        'amount': token_amount,
-                        'decimals': decimals
+                        'amount': delta,
+                        'decimals': transfer.get('decimals', 9)
                     })
             
-            if not whale_token_changes:
-                logger.debug(f"No token changes for whale in tx: {signature}")
+            # Also check native SOL transfers
+            for transfer in tx_data.get('nativeTransfers', []):
+                from_addr = transfer.get('fromUserAccount', '')
+                to_addr = transfer.get('toUserAccount', '')
+                amount_lamports = Decimal(str(transfer.get('amount', 0)))
+                amount_sol = amount_lamports / LAMPORTS_PER_SOL
+                
+                if from_addr == whale_address:
+                    whale_movements['sol'] -= amount_sol
+                elif to_addr == whale_address:
+                    whale_movements['sol'] += amount_sol
+            
+            # Also check accountData for SOL balance change (most accurate)
+            for account in tx_data.get('accountData', []):
+                if account.get('account') == whale_address:
+                    balance_change = account.get('nativeBalanceChange', 0)
+                    if balance_change != 0:
+                        # Override with accountData value (more accurate)
+                        whale_movements['sol'] = Decimal(str(balance_change)) / LAMPORTS_PER_SOL
+                    break
+            
+            # =============================================================
+            # STEP 2: Find the output token (what whale received)
+            # =============================================================
+            if not whale_movements['tokens']:
                 return None
             
-            # Get main token
-            main_token = max(whale_token_changes, key=lambda x: abs(x['amount']))
-            token_change = main_token['amount']
-            token_mint = main_token['mint']
-            token_decimals = main_token['decimals']
+            # Find token with positive balance (received)
+            received_tokens = [t for t in whale_movements['tokens'] if t['amount'] > 0]
+            sent_tokens = [t for t in whale_movements['tokens'] if t['amount'] < 0]
             
-            # Determine BUY or SELL
-            if token_change > 0 and whale_sol_change < 0:
+            if not received_tokens and not sent_tokens:
+                return None
+            
+            # =============================================================
+            # STEP 3: Determine BUY or SELL and TRUE input
+            # =============================================================
+            sol_change = whale_movements['sol']
+            usdc_change = whale_movements['usdc']
+            usdt_change = whale_movements['usdt']
+            stable_change = usdc_change + usdt_change
+            
+            trade_type = None
+            input_asset = None
+            input_amount = Decimal('0')
+            output_token = None
+            output_amount = Decimal('0')
+            
+            if received_tokens:
+                # Whale RECEIVED tokens = BUY
                 trade_type = 'BUY'
-                token_amount = float(token_change)
-                sol_amount = abs(float(whale_sol_change))
-            elif token_change < 0 and whale_sol_change > 0:
+                output_token = max(received_tokens, key=lambda x: abs(x['amount']))
+                output_amount = abs(output_token['amount'])
+                
+                # Determine what was spent (TRUE input)
+                # Priority: USDC/USDT > SOL (if SOL is dust, ignore it)
+                
+                if stable_change < -1:  # Spent more than $1 in stables
+                    input_asset = 'USDC'
+                    input_amount = abs(stable_change)
+                elif abs(sol_change) >= DUST_THRESHOLD_SOL and sol_change < 0:
+                    input_asset = 'SOL'
+                    input_amount = abs(sol_change)
+                elif stable_change < 0:  # Any stable spent
+                    input_asset = 'USDC'
+                    input_amount = abs(stable_change)
+                else:
+                    # Fallback to SOL even if small (but log warning)
+                    input_asset = 'SOL'
+                    input_amount = abs(sol_change) if sol_change < 0 else Decimal('0')
+                    if input_amount < DUST_THRESHOLD_SOL:
+                        logger.warning(f"Small SOL amount detected: {input_amount} - may be dust")
+            
+            elif sent_tokens:
+                # Whale SENT tokens = SELL
                 trade_type = 'SELL'
-                token_amount = abs(float(token_change))
-                sol_amount = float(whale_sol_change)
-            else:
-                logger.debug(f"Ambiguous tx: {signature}")
+                output_token = max(sent_tokens, key=lambda x: abs(x['amount']))
+                output_amount = abs(output_token['amount'])
+                
+                # Determine what was received
+                if stable_change > 1:  # Received more than $1 in stables
+                    input_asset = 'USDC'
+                    input_amount = abs(stable_change)
+                elif abs(sol_change) >= DUST_THRESHOLD_SOL and sol_change > 0:
+                    input_asset = 'SOL'
+                    input_amount = abs(sol_change)
+                elif stable_change > 0:
+                    input_asset = 'USDC'
+                    input_amount = abs(stable_change)
+                else:
+                    input_asset = 'SOL'
+                    input_amount = abs(sol_change) if sol_change > 0 else Decimal('0')
+            
+            if not trade_type or not output_token:
                 return None
             
-            # Get real SOL price
+            # =============================================================
+            # STEP 4: Calculate USD value
+            # =============================================================
             sol_price = TransactionParser._get_sol_price()
-            usd_value = sol_amount * sol_price
             
-            # =====================================================
-            # FIX: Get REAL token name (no more "Fungible")
-            # =====================================================
+            if input_asset == 'USDC':
+                usd_value = float(input_amount)  # USDC = USD 1:1
+            else:
+                usd_value = float(input_amount) * sol_price
+            
+            # =============================================================
+            # STEP 5: Get token metadata
+            # =============================================================
+            token_mint = output_token['mint']
             token_metadata = TransactionParser._get_token_metadata(token_mint)
-            token_symbol = token_metadata['symbol']
-            market_cap = token_metadata['market_cap']
-            token_age = token_metadata['age']
             
-            # If still UNKNOWN, do NOT show "Fungible"
-            if token_symbol == 'UNKNOWN':
-                # Last resort: use short mint address
-                token_symbol = f"{token_mint[:4]}...{token_mint[-4:]}"
-            
+            # =============================================================
+            # STEP 6: Build result
+            # =============================================================
             result = {
                 'type': trade_type,
                 'token_mint': token_mint,
-                'token_symbol': token_symbol,
-                'token_amount': token_amount,
-                'sol_amount': sol_amount,
+                'token_symbol': token_metadata['symbol'],
+                'token_amount': float(output_amount),
+                'input_asset': input_asset,  # 'SOL' or 'USDC'
+                'sol_amount': float(input_amount) if input_asset == 'SOL' else 0,
+                'usdc_amount': float(input_amount) if input_asset == 'USDC' else 0,
+                'input_amount': float(input_amount),
                 'sol_price': sol_price,
                 'usd_value': usd_value,
-                'market_cap': market_cap,
-                'token_age': token_age,
+                'market_cap': token_metadata['market_cap'],
+                'token_age': token_metadata['age'],
                 'whale_address': whale_address,
                 'signature': signature,
                 'timestamp': tx_data.get('timestamp', 0),
-                'decimals': token_decimals
+                'decimals': output_token['decimals']
             }
             
-            logger.info(f"Parsed {trade_type}: {token_amount:,.2f} {token_symbol} for {sol_amount:.4f} SOL (${usd_value:,.2f})")
+            logger.info(f"Parsed {trade_type}: {float(output_amount):,.2f} {token_metadata['symbol']} "
+                       f"for {float(input_amount):,.4f} {input_asset} (${usd_value:,.2f})")
+            
             return result
             
         except Exception as e:
