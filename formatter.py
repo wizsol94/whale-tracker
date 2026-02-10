@@ -1,8 +1,7 @@
 """
-Wally v1.0.1 — Canonical Restore (Text-Spec Locked)
-Telegram message formatter for whale trades
+Wally v1.0.2 — Formatter BUG FIX
+Handles USDC and SOL inputs correctly
 DO NOT MODIFY FORMAT - LOCKED PRODUCTION VERSION
-SPACING UPDATE ONLY - Feb 9 2026
 """
 
 import logging
@@ -18,31 +17,35 @@ class MessageFormatter:
     def format_trade_message(trade: Dict, whale_label: str) -> Tuple[str, Optional[InlineKeyboardMarkup]]:
         """
         Format trade into Telegram message
-        WALLY v1.0 CANONICAL FORMAT — DO NOT CHANGE
+        WALLY v1.0 CANONICAL FORMAT — DO NOT CHANGE LAYOUT
+        v1.0.2: Handles USDC vs SOL input correctly
         """
         try:
             trade_type = trade['type']
             token_symbol = trade['token_symbol']
             token_amount = trade['token_amount']
-            sol_amount = trade['sol_amount']
             token_mint = trade['token_mint']
             whale_address = trade.get('whale_address', '')
             usd_value = trade.get('usd_value', 0)
-            sol_price = trade.get('sol_price', 200.0)
             market_cap = trade.get('market_cap', 0)
             token_age = trade.get('token_age', '')
             
-            # Calculate USD if not provided
-            if not usd_value and sol_amount and sol_price:
-                usd_value = sol_amount * sol_price
+            # Determine input asset and amount
+            input_asset = trade.get('input_asset', 'SOL')
+            input_amount = trade.get('input_amount', 0)
+            
+            # If old format without input_asset, fallback
+            if not input_amount:
+                input_amount = trade.get('sol_amount', 0)
+                input_asset = 'SOL'
             
             # Calculate avg price
             avg_price = 0
-            if token_amount > 0:
+            if token_amount > 0 and usd_value > 0:
                 avg_price = usd_value / token_amount
             
             # Format numbers
-            sol_str = MessageFormatter._format_sol(sol_amount)
+            input_str = MessageFormatter._format_input_amount(input_amount, input_asset)
             usd_str = MessageFormatter._format_usd(usd_value)
             token_str = MessageFormatter._format_token_amount(token_amount)
             avg_str = MessageFormatter._format_avg_price(avg_price)
@@ -52,15 +55,15 @@ class MessageFormatter:
             emoji = "🟢" if trade_type == "BUY" else "🔴"
             action_line = f"{emoji} <b>{trade_type} {token_symbol} on PumpSwap</b> 🚀"
             
-            # WALLET BLOCK (no blank line between name and solscan)
+            # WALLET BLOCK
             solscan_wallet_url = f"https://solscan.io/account/{whale_address}"
             wallet_block = f"🐳 <b>{whale_label}</b>\n🔗 <a href=\"{solscan_wallet_url}\">Solscan</a>"
             
-            # SWAP DETAILS (no blank lines between these three)
+            # SWAP DETAILS - Show correct input asset
             if trade_type == "BUY":
-                swap_line = f"{whale_label} swapped {sol_str} SOL (${usd_str}) for {token_str} {token_symbol}"
+                swap_line = f"{whale_label} swapped {input_str} (${usd_str}) for {token_str} {token_symbol}"
             else:
-                swap_line = f"{whale_label} swapped {token_str} {token_symbol} for {sol_str} SOL (${usd_str})"
+                swap_line = f"{whale_label} swapped {token_str} {token_symbol} for {input_str} (${usd_str})"
             
             avg_line = f"💰 Avg: ${avg_str}"
             
@@ -68,13 +71,13 @@ class MessageFormatter:
             age_display = token_age if token_age else "N/A"
             mc_line = f"📊 MC: {mc_display} | ⏱ Seen: {age_display}"
             
-            # CONTRACT BLOCK (no standalone token label)
+            # CONTRACT BLOCK
             contract_block = f"📄 Contract:\n<code>{token_mint}</code>"
             
-            # BUILD MESSAGE WITH EXACT SPACING
+            # BUILD MESSAGE
             message = f"{action_line}\n\n{wallet_block}\n\n{swap_line}\n{avg_line}\n{mc_line}\n\n{contract_block}"
             
-            # BUTTONS (exactly two)
+            # BUTTONS
             keyboard = [
                 [
                     InlineKeyboardButton(
@@ -98,14 +101,22 @@ class MessageFormatter:
             return message, None
     
     @staticmethod
-    def _format_sol(amount: float) -> str:
-        """Format SOL amount"""
-        if amount >= 1000:
-            return f"{amount:,.1f}"
-        elif amount >= 1:
-            return f"{amount:,.2f}"
+    def _format_input_amount(amount: float, asset: str) -> str:
+        """Format input amount with correct asset label"""
+        if asset == 'USDC':
+            # USDC shows as dollar amount
+            if amount >= 1000:
+                return f"{amount:,.0f} USDC"
+            else:
+                return f"{amount:,.2f} USDC"
         else:
-            return f"{amount:,.4f}"
+            # SOL
+            if amount >= 1000:
+                return f"{amount:,.1f} SOL"
+            elif amount >= 1:
+                return f"{amount:,.2f} SOL"
+            else:
+                return f"{amount:,.4f} SOL"
     
     @staticmethod
     def _format_usd(amount: float) -> str:
@@ -157,19 +168,17 @@ class MessageFormatter:
     
     @staticmethod
     def format_whales_list(whales: list) -> str:
-        """Format list of whales for /whales command"""
+        """Format list of whales"""
         if not whales:
             return "No whales configured."
         
         message = "<b>🐋 Tracked Whales:</b>\n\n"
-        
         for whale in whales:
             status = "✅ Active" if whale['active'] else "⏸️ Paused"
             address_short = whale['address'][:8] + "..." + whale['address'][-6:]
             message += f"<b>{whale['label']}</b>\n"
             message += f"Status: {status}\n"
             message += f"Address: <code>{address_short}</code>\n\n"
-        
         return message
     
     @staticmethod
@@ -179,16 +188,13 @@ class MessageFormatter:
 
 <b>View Commands:</b>
 /whales - List all tracked whales
-/help - Show this help message
+/wally - Show commands
 
-<b>Management Commands (Admin Only):</b>
-/addwhale &lt;label&gt; &lt;address&gt; - Add new whale
-/removewhale &lt;label/address&gt; - Remove whale
-/pausewhale &lt;label/address&gt; - Pause tracking
-/resumewhale &lt;label/address&gt; - Resume tracking
-/pauseall - Pause all whales
-/resumeall - Resume all whales
-
-<b>Example:</b>
-<code>/addwhale MyWhale ABC123...</code>
+<b>Admin Commands:</b>
+/addwhale - Add whale
+/removewhale - Remove whale
+/pausewhale - Pause tracking
+/resumewhale - Resume tracking
+/pauseall - Pause all
+/resumeall - Resume all
 """
