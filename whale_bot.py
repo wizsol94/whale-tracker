@@ -1,6 +1,7 @@
 """
-Solana Whale Tracker Bot for WizTheoryLabs
-HARD-LOCKED: All alerts go to Whale-Tracking channel ONLY
+Wally v1.0.1 — Whale Tracker Bot
+LOCKED TO WHALE-TRACKING CHANNEL ONLY (Thread 164)
+NO /help command — only /wally
 """
 
 import os
@@ -29,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# HARD-LOCKED CONSTANTS - ALERTS ONLY GO HERE, NEVER ANYWHERE ELSE
+# HARD-LOCKED CONSTANTS - ALERTS AND COMMANDS ONLY GO HERE
 # =============================================================================
 WHALE_TRACKING_CHAT_ID = -1003004536161  # WizTheoryLabs group
 WHALE_TRACKING_THREAD_ID = 164            # Whale-Tracking topic (NOT General which is 1)
@@ -53,12 +54,31 @@ class WhaleTrackerBot:
         self.application = None
         self.rate_limiter = asyncio.Semaphore(20)
     
+    def _is_whale_tracking_channel(self, update: Update) -> bool:
+        """Check if message is from Whale-Tracking channel (Thread 164) ONLY"""
+        if not update.effective_chat or not update.message:
+            return False
+        
+        chat_id = update.effective_chat.id
+        thread_id = update.message.message_thread_id
+        
+        # Must be correct group AND correct thread
+        if chat_id != WHALE_TRACKING_CHAT_ID:
+            return False
+        
+        if thread_id != WHALE_TRACKING_THREAD_ID:
+            return False
+        
+        return True
+    
     async def initialize(self):
         """Initialize Telegram bot"""
         self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         self.bot = self.application.bot
         
-        # Add command handlers
+        # Command handlers - ALL check channel before responding
+        # NO /help command - only /wally
+        self.application.add_handler(CommandHandler("wally", self.cmd_wally))
         self.application.add_handler(CommandHandler("whales", self.cmd_whales))
         self.application.add_handler(CommandHandler("addwhale", self.cmd_add_whale))
         self.application.add_handler(CommandHandler("removewhale", self.cmd_remove_whale))
@@ -66,30 +86,23 @@ class WhaleTrackerBot:
         self.application.add_handler(CommandHandler("resumewhale", self.cmd_resume_whale))
         self.application.add_handler(CommandHandler("pauseall", self.cmd_pause_all))
         self.application.add_handler(CommandHandler("resumeall", self.cmd_resume_all))
-        self.application.add_handler(CommandHandler("help", self.cmd_help))
         self.application.add_handler(CommandHandler("status", self.cmd_status))
-        self.application.add_handler(CommandHandler("wally", self.cmd_help))
         
         logger.info(f"Bot initialized")
-        logger.info(f"🔒 ALERTS HARD-LOCKED TO: Chat {WHALE_TRACKING_CHAT_ID} | Thread {WHALE_TRACKING_THREAD_ID}")
+        logger.info(f"🔒 LOCKED TO: Chat {WHALE_TRACKING_CHAT_ID} | Thread {WHALE_TRACKING_THREAD_ID}")
     
     async def send_whale_alert(self, message: str, reply_markup=None):
-        """
-        HARD-LOCKED ALERT SENDER
-        ALL whale alerts go through this method
-        ALWAYS sends to WHALE_TRACKING_CHAT_ID + WHALE_TRACKING_THREAD_ID
-        NEVER uses dynamic chat IDs
-        """
+        """Send alert to Whale-Tracking channel ONLY"""
         try:
             await self.bot.send_message(
-                chat_id=WHALE_TRACKING_CHAT_ID,       # HARDCODED - never changes
-                message_thread_id=WHALE_TRACKING_THREAD_ID,  # HARDCODED - always thread 164
+                chat_id=WHALE_TRACKING_CHAT_ID,
+                message_thread_id=WHALE_TRACKING_THREAD_ID,
                 text=message,
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
                 disable_web_page_preview=True
             )
-            logger.info(f"✅ Alert sent to Whale-Tracking (chat={WHALE_TRACKING_CHAT_ID}, thread={WHALE_TRACKING_THREAD_ID})")
+            logger.info(f"✅ Alert sent to Whale-Tracking")
             return True
         except TelegramError as e:
             logger.error(f"❌ Failed to send alert: {e}")
@@ -120,7 +133,6 @@ class WhaleTrackerBot:
             
             message, reply_markup = formatter.format_trade_message(trade, whale['label'])
             
-            # USE HARD-LOCKED ALERT SENDER - NOT dynamic chat_id
             async with self.rate_limiter:
                 success = await self.send_whale_alert(message, reply_markup)
                 if success:
@@ -131,175 +143,161 @@ class WhaleTrackerBot:
             logger.error(f"Error processing transaction: {e}", exc_info=True)
     
     # =========================================================================
-    # COMMAND HANDLERS - These respond in-context (where command was sent)
+    # COMMAND HANDLERS - ALL CHECK WHALE-TRACKING CHANNEL FIRST
     # =========================================================================
     
+    async def cmd_wally(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /wally command - ONLY in Whale-Tracking channel"""
+        if not self._is_whale_tracking_channel(update):
+            return  # Silent ignore
+        
+        message = (
+            "🐋 <b>Wally Whale Tracker</b>\n\n"
+            "<b>Commands:</b>\n"
+            "/wally - Show this menu\n"
+            "/whales - List tracked whales\n"
+            "/status - Bot status\n\n"
+            "<b>Admin:</b>\n"
+            "/addwhale - Add whale\n"
+            "/removewhale - Remove whale\n"
+            "/pausewhale - Pause alerts\n"
+            "/resumewhale - Resume alerts\n"
+            "/pauseall - Pause all\n"
+            "/resumeall - Resume all"
+        )
+        await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+    
     async def cmd_whales(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /whales command - responds in-context"""
+        """Handle /whales command"""
+        if not self._is_whale_tracking_channel(update):
+            return
+        
         whales = db.get_all_whales()
-        message = self._format_whales_list(whales)
+        message = formatter.format_whales_list(whales)
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
     
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command - responds in-context"""
+        """Handle /status command"""
+        if not self._is_whale_tracking_channel(update):
+            return
+        
         whales = db.get_all_whales()
         active = sum(1 for w in whales if w['active'])
         
         message = (
             f"🐋 <b>Wally Status</b>\n\n"
             f"📊 Tracking: {len(whales)} whales ({active} active)\n"
-            f"📍 Alerts locked to: Thread {WHALE_TRACKING_THREAD_ID} ✅\n"
             f"🔔 Alerts: {'ON' if active > 0 else 'OFF'}"
         )
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
     
     async def cmd_add_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /addwhale command (admin only) - responds in-context"""
-        user_id = update.effective_user.id
+        """Handle /addwhale command (admin only)"""
+        if not self._is_whale_tracking_channel(update):
+            return
         
+        user_id = update.effective_user.id
         if user_id not in ADMIN_USER_IDS:
-            await update.message.reply_text("⛔ Admin only command")
+            await update.message.reply_text("⛔ Admin only")
             return
         
         if len(context.args) < 2:
-            await update.message.reply_text(
-                "Usage: /addwhale <label> <address>\n"
-                "Example: /addwhale MyWhale ABC123..."
-            )
+            await update.message.reply_text("Usage: /addwhale <label> <address>")
             return
         
         label = context.args[0]
         address = context.args[1]
         
         if db.add_whale(label, address):
-            await update.message.reply_text(f"✅ Added whale: {label}")
-            logger.info(f"Admin {user_id} added whale: {label}")
+            await update.message.reply_text(f"✅ Added: {label}")
         else:
-            await update.message.reply_text(f"❌ Whale already exists: {label} or {address}")
+            await update.message.reply_text(f"❌ Already exists: {label}")
     
     async def cmd_remove_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /removewhale command (admin only) - responds in-context"""
-        user_id = update.effective_user.id
+        """Handle /removewhale command (admin only)"""
+        if not self._is_whale_tracking_channel(update):
+            return
         
+        user_id = update.effective_user.id
         if user_id not in ADMIN_USER_IDS:
-            await update.message.reply_text("⛔ Admin only command")
+            await update.message.reply_text("⛔ Admin only")
             return
         
         if len(context.args) < 1:
-            await update.message.reply_text(
-                "Usage: /removewhale <label or address>\n"
-                "Example: /removewhale Gake"
-            )
+            await update.message.reply_text("Usage: /removewhale <label>")
             return
         
         identifier = context.args[0]
-        
         if db.remove_whale(identifier):
-            await update.message.reply_text(f"✅ Removed whale: {identifier}")
-            logger.info(f"Admin {user_id} removed whale: {identifier}")
+            await update.message.reply_text(f"✅ Removed: {identifier}")
         else:
-            await update.message.reply_text(f"❌ Whale not found: {identifier}")
+            await update.message.reply_text(f"❌ Not found: {identifier}")
     
     async def cmd_pause_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /pausewhale command (admin only) - responds in-context"""
-        user_id = update.effective_user.id
+        """Handle /pausewhale command (admin only)"""
+        if not self._is_whale_tracking_channel(update):
+            return
         
+        user_id = update.effective_user.id
         if user_id not in ADMIN_USER_IDS:
-            await update.message.reply_text("⛔ Admin only command")
+            await update.message.reply_text("⛔ Admin only")
             return
         
         if len(context.args) < 1:
-            await update.message.reply_text(
-                "Usage: /pausewhale <label or address>\n"
-                "Example: /pausewhale Gake"
-            )
+            await update.message.reply_text("Usage: /pausewhale <label>")
             return
         
         identifier = context.args[0]
-        
         if db.set_whale_active(identifier, False):
-            await update.message.reply_text(f"⏸️ Paused whale: {identifier}")
-            logger.info(f"Admin {user_id} paused whale: {identifier}")
+            await update.message.reply_text(f"⏸️ Paused: {identifier}")
         else:
-            await update.message.reply_text(f"❌ Whale not found: {identifier}")
+            await update.message.reply_text(f"❌ Not found: {identifier}")
     
     async def cmd_resume_whale(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /resumewhale command (admin only) - responds in-context"""
-        user_id = update.effective_user.id
+        """Handle /resumewhale command (admin only)"""
+        if not self._is_whale_tracking_channel(update):
+            return
         
+        user_id = update.effective_user.id
         if user_id not in ADMIN_USER_IDS:
-            await update.message.reply_text("⛔ Admin only command")
+            await update.message.reply_text("⛔ Admin only")
             return
         
         if len(context.args) < 1:
-            await update.message.reply_text(
-                "Usage: /resumewhale <label or address>\n"
-                "Example: /resumewhale Gake"
-            )
+            await update.message.reply_text("Usage: /resumewhale <label>")
             return
         
         identifier = context.args[0]
-        
         if db.set_whale_active(identifier, True):
-            await update.message.reply_text(f"✅ Resumed whale: {identifier}")
-            logger.info(f"Admin {user_id} resumed whale: {identifier}")
+            await update.message.reply_text(f"✅ Resumed: {identifier}")
         else:
-            await update.message.reply_text(f"❌ Whale not found: {identifier}")
+            await update.message.reply_text(f"❌ Not found: {identifier}")
     
     async def cmd_pause_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /pauseall command (admin only) - responds in-context"""
-        user_id = update.effective_user.id
+        """Handle /pauseall command (admin only)"""
+        if not self._is_whale_tracking_channel(update):
+            return
         
+        user_id = update.effective_user.id
         if user_id not in ADMIN_USER_IDS:
-            await update.message.reply_text("⛔ Admin only command")
+            await update.message.reply_text("⛔ Admin only")
             return
         
         count = db.pause_all_whales()
         await update.message.reply_text(f"⏸️ Paused all {count} whales")
-        logger.info(f"Admin {user_id} paused all whales")
     
     async def cmd_resume_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /resumeall command (admin only) - responds in-context"""
-        user_id = update.effective_user.id
+        """Handle /resumeall command (admin only)"""
+        if not self._is_whale_tracking_channel(update):
+            return
         
+        user_id = update.effective_user.id
         if user_id not in ADMIN_USER_IDS:
-            await update.message.reply_text("⛔ Admin only command")
+            await update.message.reply_text("⛔ Admin only")
             return
         
         count = db.resume_all_whales()
         await update.message.reply_text(f"✅ Resumed all {count} whales")
-        logger.info(f"Admin {user_id} resumed all whales")
-    
-    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /help and /wally commands - responds in-context"""
-        message = (
-            "🐋 <b>Wally Whale Tracker</b>\n\n"
-            "<b>Commands:</b>\n"
-            "/whales - List tracked whales\n"
-            "/status - Bot status\n"
-            "/addwhale - Add whale (admin)\n"
-            "/removewhale - Remove whale (admin)\n"
-            "/pausewhale - Pause alerts (admin)\n"
-            "/resumewhale - Resume alerts (admin)\n"
-            "/pauseall - Pause all (admin)\n"
-            "/resumeall - Resume all (admin)\n"
-            "/help - Show this message\n\n"
-            f"🔒 <i>Alerts locked to Whale-Tracking channel</i>"
-        )
-        await update.message.reply_text(message, parse_mode=ParseMode.HTML)
-    
-    def _format_whales_list(self, whales):
-        """Format whales list for display"""
-        if not whales:
-            return "❌ No whales configured."
-        
-        lines = ["🐋 <b>Tracked Whales:</b>\n"]
-        for whale in whales:
-            status = "✅" if whale['active'] else "⏸️"
-            lines.append(f"{status} <b>{whale['label']}</b>")
-            lines.append(f"   <code>{whale['address'][:20]}...</code>\n")
-        
-        return "\n".join(lines)
     
     def run_telegram_bot(self):
         """Run Telegram bot (polling)"""
@@ -323,15 +321,13 @@ def main():
         return
     
     if not ADMIN_USER_IDS:
-        logger.warning("ADMIN_USER_IDS not set - no admin access!")
+        logger.warning("ADMIN_USER_IDS not set!")
     
     logger.info("=" * 60)
-    logger.info("🐋 WALLY WHALE TRACKER")
+    logger.info("🐋 WALLY WHALE TRACKER v1.0.1")
     logger.info("=" * 60)
-    logger.info(f"🔒 HARD-LOCKED ALERT DESTINATION:")
-    logger.info(f"   Chat ID: {WHALE_TRACKING_CHAT_ID}")
-    logger.info(f"   Thread ID: {WHALE_TRACKING_THREAD_ID} (Whale-Tracking)")
-    logger.info(f"   General (thread 1) will NEVER receive alerts")
+    logger.info(f"🔒 LOCKED TO: Thread {WHALE_TRACKING_THREAD_ID} (Whale-Tracking)")
+    logger.info(f"❌ /help removed — use /wally only")
     logger.info("=" * 60)
     
     bot = WhaleTrackerBot()
