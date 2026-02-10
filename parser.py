@@ -1,6 +1,7 @@
 """
-Wally v1.0.2 — Parser BUG FIX
+Wally v1.0.3 — Parser BUG FIX
 Accurate swap detection: TRUE input asset, ignore dust, handle USDC
+Fixes zero-value / dust alerts leaking through
 DO NOT MODIFY FORMAT - LOCKED PRODUCTION VERSION
 """
 
@@ -20,6 +21,7 @@ USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 
 LAMPORTS_PER_SOL = Decimal('1000000000')
 DUST_THRESHOLD_SOL = Decimal('0.01')  # Ignore SOL movements below this
+MIN_USD_VALUE = 1.0                    # Minimum USD value for a valid alert
 
 
 class TransactionParser:
@@ -123,10 +125,11 @@ class TransactionParser:
         """
         Parse Helius transaction with ACCURATE swap detection
         
-        FIX v1.0.2:
+        FIX v1.0.3:
         - Detect TRUE input asset (USDC vs SOL)
         - Ignore dust SOL movements (< 0.01 SOL)
         - Handle routed swaps (Jupiter, PumpSwap)
+        - REJECT zero-value, dust, and economically meaningless swaps
         """
         try:
             signature = tx_data.get('signature')
@@ -189,14 +192,16 @@ class TransactionParser:
                 elif to_addr == whale_address:
                     whale_movements['sol'] += amount_sol
             
-            # Also check accountData for SOL balance change (most accurate)
-            for account in tx_data.get('accountData', []):
-                if account.get('account') == whale_address:
-                    balance_change = account.get('nativeBalanceChange', 0)
-                    if balance_change != 0:
-                        # Override with accountData value (more accurate)
-                        whale_movements['sol'] = Decimal(str(balance_change)) / LAMPORTS_PER_SOL
-                    break
+            # -----------------------------------------------------------------
+            # FIX v1.0.3: REMOVED accountData override
+            # -----------------------------------------------------------------
+            # The old code overwrote whale_movements['sol'] with the raw
+            # nativeBalanceChange from accountData. This value includes tx fees,
+            # rent, and other non-swap SOL movements, which caused dust-level
+            # SOL changes (like 0.000005 SOL fees) to be misread as swap input.
+            # Token transfers + native transfers above are sufficient and more
+            # accurate for determining actual SOL spent/received in a swap.
+            # -----------------------------------------------------------------
             
             # =============================================================
             # STEP 2: Find the output token (what whale received)
@@ -244,11 +249,19 @@ class TransactionParser:
                     input_asset = 'USDC'
                     input_amount = abs(stable_change)
                 else:
-                    # Fallback to SOL even if small (but log warning)
-                    input_asset = 'SOL'
-                    input_amount = abs(sol_change) if sol_change < 0 else Decimal('0')
-                    if input_amount < DUST_THRESHOLD_SOL:
-                        logger.warning(f"Small SOL amount detected: {input_amount} - may be dust")
+                    # =========================================================
+                    # FIX v1.0.3: REJECT instead of fallback
+                    # =========================================================
+                    # Old code fell through here with input_amount=0 and still
+                    # built + returned a result, producing 0.0000 SOL ($0.00)
+                    # alerts. If we reach this point, no meaningful SOL or
+                    # stablecoin was spent — this is NOT a real swap.
+                    # (Likely an airdrop, token init, free claim, or dust.)
+                    # =========================================================
+                    logger.info(f"Skipping non-swap: tokens received but no SOL/stable spent "
+                               f"(sol_change={sol_change}, stable_change={stable_change}) "
+                               f"sig={signature[:16]}...")
+                    return None
             
             elif sent_tokens:
                 # Whale SENT tokens = SELL
@@ -267,8 +280,13 @@ class TransactionParser:
                     input_asset = 'USDC'
                     input_amount = abs(stable_change)
                 else:
-                    input_asset = 'SOL'
-                    input_amount = abs(sol_change) if sol_change > 0 else Decimal('0')
+                    # =========================================================
+                    # FIX v1.0.3: REJECT sells with no SOL/stable received too
+                    # =========================================================
+                    logger.info(f"Skipping non-swap: tokens sent but no SOL/stable received "
+                               f"(sol_change={sol_change}, stable_change={stable_change}) "
+                               f"sig={signature[:16]}...")
+                    return None
             
             if not trade_type or not output_token:
                 return None
@@ -282,6 +300,20 @@ class TransactionParser:
                 usd_value = float(input_amount)  # USDC = USD 1:1
             else:
                 usd_value = float(input_amount) * sol_price
+            
+            # =============================================================
+            # FIX v1.0.3: FINAL VALIDATION GATE
+            # =============================================================
+            # Reject any trade that still has economically meaningless values.
+            # This is the last line of defense before an alert is sent.
+            # =============================================================
+            if float(input_amount) < float(DUST_THRESHOLD_SOL) and input_asset == 'SOL':
+                logger.info(f"Filtered dust SOL swap: {float(input_amount):.6f} SOL, sig={signature[:16]}...")
+                return None
+            
+            if usd_value < MIN_USD_VALUE:
+                logger.info(f"Filtered low-value swap: ${usd_value:.2f}, sig={signature[:16]}...")
+                return None
             
             # =============================================================
             # STEP 5: Get token metadata
