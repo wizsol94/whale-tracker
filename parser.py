@@ -1,7 +1,8 @@
 """
-Wally v1.0.3 — Parser BUG FIX
+Wally v1.0.4 — Parser BUG FIX
 Accurate swap detection: TRUE input asset, ignore dust, handle USDC
 Fixes zero-value / dust alerts leaking through
+Restores accountData as FALLBACK for PumpSwap routed SOL detection
 DO NOT MODIFY FORMAT - LOCKED PRODUCTION VERSION
 """
 
@@ -125,11 +126,12 @@ class TransactionParser:
         """
         Parse Helius transaction with ACCURATE swap detection
         
-        FIX v1.0.3:
+        FIX v1.0.4:
         - Detect TRUE input asset (USDC vs SOL)
         - Ignore dust SOL movements (< 0.01 SOL)
         - Handle routed swaps (Jupiter, PumpSwap)
         - REJECT zero-value, dust, and economically meaningless swaps
+        - Use accountData as FALLBACK (not override) for PumpSwap SOL detection
         """
         try:
             signature = tx_data.get('signature')
@@ -193,15 +195,29 @@ class TransactionParser:
                     whale_movements['sol'] += amount_sol
             
             # -----------------------------------------------------------------
-            # FIX v1.0.3: REMOVED accountData override
+            # FIX v1.0.4: accountData as FALLBACK only (not override)
             # -----------------------------------------------------------------
-            # The old code overwrote whale_movements['sol'] with the raw
-            # nativeBalanceChange from accountData. This value includes tx fees,
-            # rent, and other non-swap SOL movements, which caused dust-level
-            # SOL changes (like 0.000005 SOL fees) to be misread as swap input.
-            # Token transfers + native transfers above are sufficient and more
-            # accurate for determining actual SOL spent/received in a swap.
+            # On PumpSwap and some Jupiter routes, SOL flows through WSOL
+            # wrapping and program accounts in a way that doesn't always
+            # show the whale address cleanly in tokenTransfers or
+            # nativeTransfers. If those sources show near-zero SOL movement,
+            # fall back to accountData's nativeBalanceChange — but ONLY if
+            # that value is above the dust threshold (filtering out fee-only
+            # balance changes like 0.000005 SOL).
             # -----------------------------------------------------------------
+            if abs(whale_movements['sol']) < DUST_THRESHOLD_SOL:
+                for account in tx_data.get('accountData', []):
+                    if account.get('account') == whale_address:
+                        balance_change = account.get('nativeBalanceChange', 0)
+                        if balance_change != 0:
+                            account_sol = Decimal(str(balance_change)) / LAMPORTS_PER_SOL
+                            # Only use if above dust — this filters out fee-only
+                            # changes (0.000005 SOL) that caused the original bug
+                            if abs(account_sol) >= DUST_THRESHOLD_SOL:
+                                logger.info(f"accountData fallback: {float(account_sol):.4f} SOL "
+                                          f"(token/native showed {float(whale_movements['sol']):.6f} SOL)")
+                                whale_movements['sol'] = account_sol
+                        break
             
             # =============================================================
             # STEP 2: Find the output token (what whale received)
@@ -250,13 +266,10 @@ class TransactionParser:
                     input_amount = abs(stable_change)
                 else:
                     # =========================================================
-                    # FIX v1.0.3: REJECT instead of fallback
+                    # FIX v1.0.3+: REJECT instead of fallback
                     # =========================================================
-                    # Old code fell through here with input_amount=0 and still
-                    # built + returned a result, producing 0.0000 SOL ($0.00)
-                    # alerts. If we reach this point, no meaningful SOL or
-                    # stablecoin was spent — this is NOT a real swap.
-                    # (Likely an airdrop, token init, free claim, or dust.)
+                    # No meaningful SOL or stablecoin was spent — this is NOT
+                    # a real swap. (Likely airdrop, token init, free claim.)
                     # =========================================================
                     logger.info(f"Skipping non-swap: tokens received but no SOL/stable spent "
                                f"(sol_change={sol_change}, stable_change={stable_change}) "
@@ -281,7 +294,7 @@ class TransactionParser:
                     input_amount = abs(stable_change)
                 else:
                     # =========================================================
-                    # FIX v1.0.3: REJECT sells with no SOL/stable received too
+                    # FIX v1.0.3+: REJECT sells with no SOL/stable received too
                     # =========================================================
                     logger.info(f"Skipping non-swap: tokens sent but no SOL/stable received "
                                f"(sol_change={sol_change}, stable_change={stable_change}) "
@@ -302,7 +315,7 @@ class TransactionParser:
                 usd_value = float(input_amount) * sol_price
             
             # =============================================================
-            # FIX v1.0.3: FINAL VALIDATION GATE
+            # FIX v1.0.3+: FINAL VALIDATION GATE
             # =============================================================
             # Reject any trade that still has economically meaningless values.
             # This is the last line of defense before an alert is sent.
