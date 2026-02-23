@@ -200,22 +200,12 @@ class TransactionParser:
             # -----------------------------------------------------------------
             # FIX v1.0.4: accountData as FALLBACK only (not override)
             # -----------------------------------------------------------------
-            # On PumpSwap and some Jupiter routes, SOL flows through WSOL
-            # wrapping and program accounts in a way that doesn't always
-            # show the whale address cleanly in tokenTransfers or
-            # nativeTransfers. If those sources show near-zero SOL movement,
-            # fall back to accountData's nativeBalanceChange — but ONLY if
-            # that value is above the dust threshold (filtering out fee-only
-            # balance changes like 0.000005 SOL).
-            # -----------------------------------------------------------------
             if abs(whale_movements['sol']) < DUST_THRESHOLD_SOL:
                 for account in tx_data.get('accountData', []):
                     if account.get('account') == whale_address:
                         balance_change = account.get('nativeBalanceChange', 0)
                         if balance_change != 0:
                             account_sol = Decimal(str(balance_change)) / LAMPORTS_PER_SOL
-                            # Only use if above dust — this filters out fee-only
-                            # changes (0.000005 SOL) that caused the original bug
                             if abs(account_sol) >= DUST_THRESHOLD_SOL:
                                 logger.info(f"accountData fallback: {float(account_sol):.4f} SOL "
                                           f"(token/native showed {float(whale_movements['sol']):.6f} SOL)")
@@ -255,22 +245,16 @@ class TransactionParser:
                 output_token = max(received_tokens, key=lambda x: abs(x['amount']))
                 output_amount = abs(output_token['amount'])
                 
-                # Determine what was spent (TRUE input)
-                # Priority: USDC/USDT > SOL (if SOL is dust, ignore it)
-                
-                if stable_change < -1:  # Spent more than $1 in stables
+                if stable_change < -1:
                     input_asset = 'USDC'
                     input_amount = abs(stable_change)
                 elif abs(sol_change) >= DUST_THRESHOLD_SOL and sol_change < 0:
                     input_asset = 'SOL'
                     input_amount = abs(sol_change)
-                elif stable_change < 0:  # Any stable spent
+                elif stable_change < 0:
                     input_asset = 'USDC'
                     input_amount = abs(stable_change)
                 else:
-                    # =========================================================
-                    # FIX v1.0.3+: REJECT instead of fallback
-                    # =========================================================
                     logger.info(f"Skipping non-swap: tokens received but no SOL/stable spent "
                                f"(sol_change={sol_change}, stable_change={stable_change}) "
                                f"sig={signature[:16]}...")
@@ -282,8 +266,7 @@ class TransactionParser:
                 output_token = max(sent_tokens, key=lambda x: abs(x['amount']))
                 output_amount = abs(output_token['amount'])
                 
-                # Determine what was received
-                if stable_change > 1:  # Received more than $1 in stables
+                if stable_change > 1:
                     input_asset = 'USDC'
                     input_amount = abs(stable_change)
                 elif abs(sol_change) >= DUST_THRESHOLD_SOL and sol_change > 0:
@@ -293,9 +276,6 @@ class TransactionParser:
                     input_asset = 'USDC'
                     input_amount = abs(stable_change)
                 else:
-                    # =========================================================
-                    # FIX v1.0.3+: REJECT sells with no SOL/stable received too
-                    # =========================================================
                     logger.info(f"Skipping non-swap: tokens sent but no SOL/stable received "
                                f"(sol_change={sol_change}, stable_change={stable_change}) "
                                f"sig={signature[:16]}...")
@@ -310,7 +290,7 @@ class TransactionParser:
             sol_price = TransactionParser._get_sol_price()
             
             if input_asset == 'USDC':
-                usd_value = float(input_amount)  # USDC = USD 1:1
+                usd_value = float(input_amount)
             else:
                 usd_value = float(input_amount) * sol_price
             
@@ -322,9 +302,6 @@ class TransactionParser:
             
             # =============================================================
             # FIX v1.0.5: FINAL VALIDATION GATE (strengthened)
-            # =============================================================
-            # This is the last line of defense before an alert is sent.
-            # ALL of these must pass or the transaction is silently dropped.
             # =============================================================
             
             # Gate 1: SOL input must be above dust threshold
@@ -338,15 +315,9 @@ class TransactionParser:
                 return None
             
             # Gate 3: Token must have real metadata from DexScreener
-            # If DexScreener returned nothing (no pairs), the symbol will be
-            # the truncated contract address (e.g. "3qq5...pump") and MC will
-            # be 0. These are tokens with no liquidity pool — not real swaps
-            # worth alerting on.
             token_symbol = token_metadata['symbol']
             token_mc = token_metadata['market_cap']
             
-            # Check if symbol is just a truncated contract address
-            # (format: "XXXX...XXXX" where it matches the mint)
             symbol_is_contract = (
                 '...' in token_symbol and
                 token_mint.startswith(token_symbol.split('...')[0]) and
@@ -366,7 +337,7 @@ class TransactionParser:
                 'token_mint': token_mint,
                 'token_symbol': token_metadata['symbol'],
                 'token_amount': float(output_amount),
-                'input_asset': input_asset,  # 'SOL' or 'USDC'
+                'input_asset': input_asset,
                 'sol_amount': float(input_amount) if input_asset == 'SOL' else 0,
                 'usdc_amount': float(input_amount) if input_asset == 'USDC' else 0,
                 'input_amount': float(input_amount),
