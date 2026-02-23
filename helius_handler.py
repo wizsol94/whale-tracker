@@ -1,6 +1,7 @@
 """
 Helius webhook handler
 Processes incoming transaction webhooks from Helius
+FIX: Accepts shared db instance instead of creating a separate one
 """
 
 import logging
@@ -10,18 +11,18 @@ from typing import Dict, Callable, Set
 
 logger = logging.getLogger(__name__)
 
-# Import database to get whale addresses
 from database import Database
 
 class HeliusWebhookHandler:
     
-    def __init__(self, on_transaction: Callable):
+    def __init__(self, on_transaction: Callable, db: Database = None):
         """
         Initialize webhook handler
+        FIX: Accept shared db instance to avoid dual Database() instances
         """
         self.on_transaction = on_transaction
         self.app = Flask(__name__)
-        self.db = Database()
+        self.db = db if db is not None else Database()
         self.setup_routes()
     
     def _get_whale_addresses(self) -> Set[str]:
