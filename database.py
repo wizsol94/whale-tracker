@@ -1,5 +1,7 @@
 """
 Simple SQLite Database for Whale Tracking
+FIX: All whales hardcoded in seed, seed runs on every startup (INSERT OR IGNORE)
+so whales survive Railway ephemeral filesystem resets.
 """
 
 import sqlite3
@@ -7,6 +9,21 @@ import logging
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# MASTER WHALE LIST — These are ALWAYS guaranteed to exist after startup.
+# Add new whales here so they survive Railway restarts/redeploys.
+# /addwhale still works for temporary additions, but anything added that way
+# will be lost on redeploy unless also added here.
+# =============================================================================
+SEED_WHALES = [
+    ("Gake", "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm"),
+    ("GakeAlt", "EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt"),
+    ("TraderPow", "8zFZHuSRuDpuAR7J6FzwyF3vKNx4CVW3DFHJerQhc7Zd"),
+    ("Ansem", "AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm"),
+    ("FrankDegod", "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ"),
+]
+# =============================================================================
 
 
 class Database:
@@ -45,32 +62,31 @@ class Database:
         conn.close()
     
     def _seed_whales(self):
-        """Seed initial whales if table is empty"""
+        """
+        Seed whales on EVERY startup using INSERT OR IGNORE.
+        This guarantees all whales in SEED_WHALES exist even after
+        Railway wipes the filesystem on redeploy/restart.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
         
+        for label, address in SEED_WHALES:
+            try:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO whales (label, address) VALUES (?, ?)",
+                    (label, address)
+                )
+                if cursor.rowcount > 0:
+                    logger.info(f"Seeded whale: {label}")
+            except sqlite3.IntegrityError:
+                pass
+        
+        conn.commit()
+        
+        # Log final whale count for verification
         cursor.execute("SELECT COUNT(*) FROM whales")
         count = cursor.fetchone()[0]
-        
-        if count == 0:
-            initial_whales = [
-                ("Gake", "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm"),
-                ("GakeAlt", "EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt"),
-                ("TraderPow", "8zFZHuSRuDpuAR7J6FzwyF3vKNx4CVW3DFHJerQhc7Zd"),
-                ("Ansem", "AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm"),
-            ]
-            
-            for label, address in initial_whales:
-                try:
-                    cursor.execute(
-                        "INSERT INTO whales (label, address) VALUES (?, ?)",
-                        (label, address)
-                    )
-                    logger.info(f"Seeded whale: {label}")
-                except sqlite3.IntegrityError:
-                    pass
-            
-            conn.commit()
+        logger.info(f"Whale database ready: {count} whales loaded")
         
         conn.close()
     
