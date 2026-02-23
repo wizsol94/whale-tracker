@@ -1,6 +1,9 @@
 """
-Wally v1.0.2 — Parser BUG FIX
+Wally v1.0.5 — Parser BUG FIX
 Accurate swap detection: TRUE input asset, ignore dust, handle USDC
+Fixes zero-value / dust alerts leaking through
+Restores accountData as FALLBACK for PumpSwap routed SOL detection
+Tighter dust/validity filtering to block sub-dust and no-metadata alerts
 DO NOT MODIFY FORMAT - LOCKED PRODUCTION VERSION
 """
 
@@ -20,6 +23,7 @@ USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 
 LAMPORTS_PER_SOL = Decimal('1000000000')
 DUST_THRESHOLD_SOL = Decimal('0.01')  # Ignore SOL movements below this
+MIN_USD_VALUE = 1.0                    # Minimum USD value for a valid alert
 
 
 class TransactionParser:
@@ -123,10 +127,14 @@ class TransactionParser:
         """
         Parse Helius transaction with ACCURATE swap detection
         
-        FIX v1.0.2:
+        FIX v1.0.5:
         - Detect TRUE input asset (USDC vs SOL)
         - Ignore dust SOL movements (< 0.01 SOL)
         - Handle routed swaps (Jupiter, PumpSwap)
+        - REJECT zero-value, dust, and economically meaningless swaps
+        - Use accountData as FALLBACK (not override) for PumpSwap SOL detection
+        - Final validation gate catches ALL edge cases (SOL dust + USD minimum)
+        - Reject tokens with no DexScreener metadata (no MC, no symbol)
         """
         try:
             signature = tx_data.get('signature')
@@ -189,14 +197,30 @@ class TransactionParser:
                 elif to_addr == whale_address:
                     whale_movements['sol'] += amount_sol
             
-            # Also check accountData for SOL balance change (most accurate)
-            for account in tx_data.get('accountData', []):
-                if account.get('account') == whale_address:
-                    balance_change = account.get('nativeBalanceChange', 0)
-                    if balance_change != 0:
-                        # Override with accountData value (more accurate)
-                        whale_movements['sol'] = Decimal(str(balance_change)) / LAMPORTS_PER_SOL
-                    break
+            # -----------------------------------------------------------------
+            # FIX v1.0.4: accountData as FALLBACK only (not override)
+            # -----------------------------------------------------------------
+            # On PumpSwap and some Jupiter routes, SOL flows through WSOL
+            # wrapping and program accounts in a way that doesn't always
+            # show the whale address cleanly in tokenTransfers or
+            # nativeTransfers. If those sources show near-zero SOL movement,
+            # fall back to accountData's nativeBalanceChange — but ONLY if
+            # that value is above the dust threshold (filtering out fee-only
+            # balance changes like 0.000005 SOL).
+            # -----------------------------------------------------------------
+            if abs(whale_movements['sol']) < DUST_THRESHOLD_SOL:
+                for account in tx_data.get('accountData', []):
+                    if account.get('account') == whale_address:
+                        balance_change = account.get('nativeBalanceChange', 0)
+                        if balance_change != 0:
+                            account_sol = Decimal(str(balance_change)) / LAMPORTS_PER_SOL
+                            # Only use if above dust — this filters out fee-only
+                            # changes (0.000005 SOL) that caused the original bug
+                            if abs(account_sol) >= DUST_THRESHOLD_SOL:
+                                logger.info(f"accountData fallback: {float(account_sol):.4f} SOL "
+                                          f"(token/native showed {float(whale_movements['sol']):.6f} SOL)")
+                                whale_movements['sol'] = account_sol
+                        break
             
             # =============================================================
             # STEP 2: Find the output token (what whale received)
@@ -244,11 +268,13 @@ class TransactionParser:
                     input_asset = 'USDC'
                     input_amount = abs(stable_change)
                 else:
-                    # Fallback to SOL even if small (but log warning)
-                    input_asset = 'SOL'
-                    input_amount = abs(sol_change) if sol_change < 0 else Decimal('0')
-                    if input_amount < DUST_THRESHOLD_SOL:
-                        logger.warning(f"Small SOL amount detected: {input_amount} - may be dust")
+                    # =========================================================
+                    # FIX v1.0.3+: REJECT instead of fallback
+                    # =========================================================
+                    logger.info(f"Skipping non-swap: tokens received but no SOL/stable spent "
+                               f"(sol_change={sol_change}, stable_change={stable_change}) "
+                               f"sig={signature[:16]}...")
+                    return None
             
             elif sent_tokens:
                 # Whale SENT tokens = SELL
@@ -267,8 +293,13 @@ class TransactionParser:
                     input_asset = 'USDC'
                     input_amount = abs(stable_change)
                 else:
-                    input_asset = 'SOL'
-                    input_amount = abs(sol_change) if sol_change > 0 else Decimal('0')
+                    # =========================================================
+                    # FIX v1.0.3+: REJECT sells with no SOL/stable received too
+                    # =========================================================
+                    logger.info(f"Skipping non-swap: tokens sent but no SOL/stable received "
+                               f"(sol_change={sol_change}, stable_change={stable_change}) "
+                               f"sig={signature[:16]}...")
+                    return None
             
             if not trade_type or not output_token:
                 return None
@@ -288,6 +319,44 @@ class TransactionParser:
             # =============================================================
             token_mint = output_token['mint']
             token_metadata = TransactionParser._get_token_metadata(token_mint)
+            
+            # =============================================================
+            # FIX v1.0.5: FINAL VALIDATION GATE (strengthened)
+            # =============================================================
+            # This is the last line of defense before an alert is sent.
+            # ALL of these must pass or the transaction is silently dropped.
+            # =============================================================
+            
+            # Gate 1: SOL input must be above dust threshold
+            if input_asset == 'SOL' and float(input_amount) < float(DUST_THRESHOLD_SOL):
+                logger.info(f"Filtered dust SOL swap: {float(input_amount):.6f} SOL, sig={signature[:16]}...")
+                return None
+            
+            # Gate 2: USD value must be at least $1
+            if usd_value < MIN_USD_VALUE:
+                logger.info(f"Filtered low-value swap: ${usd_value:.2f}, sig={signature[:16]}...")
+                return None
+            
+            # Gate 3: Token must have real metadata from DexScreener
+            # If DexScreener returned nothing (no pairs), the symbol will be
+            # the truncated contract address (e.g. "3qq5...pump") and MC will
+            # be 0. These are tokens with no liquidity pool — not real swaps
+            # worth alerting on.
+            token_symbol = token_metadata['symbol']
+            token_mc = token_metadata['market_cap']
+            
+            # Check if symbol is just a truncated contract address
+            # (format: "XXXX...XXXX" where it matches the mint)
+            symbol_is_contract = (
+                '...' in token_symbol and
+                token_mint.startswith(token_symbol.split('...')[0]) and
+                token_mint.endswith(token_symbol.split('...')[-1])
+            )
+            
+            if symbol_is_contract and token_mc <= 0:
+                logger.info(f"Filtered unknown token (no DexScreener data): {token_symbol}, "
+                          f"MC={token_mc}, sig={signature[:16]}...")
+                return None
             
             # =============================================================
             # STEP 6: Build result
