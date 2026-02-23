@@ -2,6 +2,7 @@
 Wally v1.0.1 — Whale Tracker Bot
 LOCKED TO WHALE-TRACKING CHANNEL ONLY (Thread 164)
 NO /help command — only /wally
+FIX: Shared db instance passed to webhook handler
 """
 
 import os
@@ -307,7 +308,8 @@ class WhaleTrackerBot:
     def run_webhook_server(self):
         """Run Helius webhook server"""
         logger.info("Starting Helius webhook server...")
-        webhook_handler = HeliusWebhookHandler(on_transaction=self.process_transaction)
+        # FIX: Pass shared db instance to webhook handler
+        webhook_handler = HeliusWebhookHandler(on_transaction=self.process_transaction, db=db)
         webhook_handler.run(port=WEBHOOK_PORT)
 
 
