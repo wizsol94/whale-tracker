@@ -1,13 +1,15 @@
 """
-Wally v1.0.1 — Whale Tracker Bot
+Wally v1.0.2 — Whale Tracker Bot + Jayce Integration
 LOCKED TO WHALE-TRACKING CHANNEL ONLY (Thread 164)
 NO /help command — only /wally
 FIX: Shared db instance passed to webhook handler
+NEW: Sends whale buys to Jayce for setup scanning
 """
 
 import os
 import logging
 import asyncio
+import aiohttp
 from telegram import Update, Bot
 from telegram.ext import (
     Application,
@@ -36,6 +38,10 @@ logger = logging.getLogger(__name__)
 WHALE_TRACKING_CHAT_ID = -1003004536161  # WizTheoryLabs group
 WHALE_TRACKING_THREAD_ID = 164            # Whale-Tracking topic (NOT General which is 1)
 # =============================================================================
+
+# Jayce Integration
+JAYCE_WEBHOOK_URL = "http://104.236.105.118:5000/whale"
+JAYCE_API_KEY = "jayce_collector_2026_secret_key"
 
 # Other configuration from environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -109,6 +115,37 @@ class WhaleTrackerBot:
             logger.error(f"❌ Failed to send alert: {e}")
             return False
     
+    async def send_to_jayce(self, trade: dict, whale_label: str):
+        """Send whale buy to Jayce for setup scanning"""
+        if trade.get('type') != 'BUY':
+            return  # Only send buys to Jayce
+        
+        try:
+            payload = {
+                "token_address": trade.get('token_mint', ''),
+                "pair_address": "",  # Jayce will look this up
+                "symbol": trade.get('token_symbol', '???'),
+                "whale_wallet": trade.get('whale_address', ''),
+                "buy_amount_sol": trade.get('sol_amount', 0) or (trade.get('usd_value', 0) / trade.get('sol_price', 200))
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    JAYCE_WEBHOOK_URL,
+                    json=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-API-Key": JAYCE_API_KEY
+                    },
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as response:
+                    if response.status == 200:
+                        logger.info(f"🐋→🎯 Sent {trade['token_symbol']} to Jayce")
+                    else:
+                        logger.warning(f"Jayce webhook returned {response.status}")
+        except Exception as e:
+            logger.error(f"Failed to send to Jayce: {e}")
+    
     async def process_transaction(self, tx_data: dict, whale_address: str):
         """Process incoming transaction from Helius webhook"""
         try:
@@ -139,6 +176,10 @@ class WhaleTrackerBot:
                 if success:
                     logger.info(f"Posted {trade['type']} alert for {whale['label']}")
                     db.mark_tx_processed(signature)
+                    
+                    # NEW: Send BUY alerts to Jayce for setup scanning
+                    if trade['type'] == 'BUY':
+                        await self.send_to_jayce(trade, whale['label'])
             
         except Exception as e:
             logger.error(f"Error processing transaction: {e}", exc_info=True)
@@ -326,10 +367,11 @@ def main():
         logger.warning("ADMIN_USER_IDS not set!")
     
     logger.info("=" * 60)
-    logger.info("🐋 WALLY WHALE TRACKER v1.0.1")
+    logger.info("🐋 WALLY WHALE TRACKER v1.0.2")
     logger.info("=" * 60)
     logger.info(f"🔒 LOCKED TO: Thread {WHALE_TRACKING_THREAD_ID} (Whale-Tracking)")
     logger.info(f"❌ /help removed — use /wally only")
+    logger.info(f"🎯 Jayce integration: ENABLED")
     logger.info("=" * 60)
     
     bot = WhaleTrackerBot()
